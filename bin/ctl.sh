@@ -66,6 +66,52 @@ validate_zip() {
   return 0
 }
 
+# ---------- 修正非标准的 desc.txt ----------
+# 小米那套动画会在 desc.txt 里用「g 宽 高 偏移x 偏移y 帧率」这种写法，
+# AOSP 的 bootanimation 不认这行，会直接放弃 → 开机黑屏（真机上验证过）。
+# 这里把它改成标准的「宽 高 帧率」。
+#
+# 做法：用 grep -abo 找到那一行在 zip 里的字节偏移，用「等长的内容」原地覆盖。
+# 长度不变，zip 的头和中央目录都不用动。改完 CRC 会和实际内容对不上，
+# 但 bootanimation 读 STORED 条目是直接拷贝、不校验 CRC，所以照常能播（已验证）。
+normalize_zip() {
+  nz="$1"
+  [ -f "$nz" ] || return 1
+  desc=$(unzip -p "$nz" desc.txt 2>/dev/null | tr -d '\r') || return 1
+  [ -n "$desc" ] || return 1
+
+  gline=""
+  while IFS= read -r ln; do
+    case "$ln" in
+      ''|'#'*) continue ;;          # 空行和注释跳过
+      'g '*) gline="$ln" ;;         # 小米那套
+      *) return 0 ;;                # 其它情况（多半已经是标准写法）
+    esac
+    break
+  done <<EOF
+$desc
+EOF
+  [ -n "$gline" ] || return 0
+
+  set -- $gline
+  [ -n "$2" ] && [ -n "$3" ] && [ -n "$6" ] || return 1
+  new="$2 $3 $6"
+
+  len=${#gline}
+  pad=$(( len - ${#new} ))
+  [ "$pad" -ge 0 ] || return 1                      # 变长就不敢原地改
+  repl=$(printf "%s%*s" "$new" "$pad" "")
+
+  off=$(grep -abo "$gline" "$nz" 2>/dev/null | head -1 | cut -d: -f1)
+  [ -n "$off" ] || return 1
+  printf '%s' "$repl" | dd of="$nz" bs=1 seek="$off" conv=notrunc 2>/dev/null || return 1
+
+  # 内容变了但字节数没变，stamp 看不出来 → 清掉，逼下次部署重新拷贝
+  rm -f "$STAMP_FILE" 2>/dev/null
+  log "normalized desc.txt: $gline -> $new ($nz)"
+  return 0
+}
+
 # ---------- 动画库列表（每次运行只枚举一次） ----------
 ENTRIES_INIT=""
 ENTRIES=""
@@ -118,7 +164,7 @@ active_path() {
 }
 
 desc_info() {
-  unzip -p "$1" desc.txt 2>/dev/null | tr -d '\r' | awk '/^[0-9]+[ \t]+[0-9]+/ {print $1"×"$2" · "$3"fps"; exit}'
+  unzip -p "$1" desc.txt 2>/dev/null | tr -d '\r' | awk '/^[0-9]+[ \t]+[0-9]+/ {print $1"×"$2" · "$3"fps"; exit} /^g[ \t]+[0-9]+/ {print $2"×"$3" · "$6"fps"; exit}'
 }
 
 # ---------- 守卫脚本（关键：让「关闭模块」也能恢复出厂动画） ----------
@@ -165,6 +211,8 @@ deploy_active() {
   ap=$(active_path)
   if [ -z "$ap" ]; then log "deploy skipped: no active animation"; return 1; fi
   an=$(active_name)
+  # 顺手修正非标准的 desc.txt；改过就会清掉 stamp，下面自然重新拷贝一次
+  normalize_zip "$ap" >/dev/null 2>&1
   new_size=$(file_size "$ap")
   stamp_val="$an:$new_size"
 
@@ -292,6 +340,7 @@ cmd_import() {
   tmp="$LIB_DIR/.import.$$.tmp"
   if cp -f "$src" "$tmp" 2>/dev/null && mv -f "$tmp" "$target" 2>/dev/null; then
     chmod 0644 "$target" 2>/dev/null
+    normalize_zip "$target" >/dev/null 2>&1     # 非标准 desc.txt 顺手修正（改的是库里的副本）
     log "imported: $target"
     echo "OK stored=${target##*/}"
   else
