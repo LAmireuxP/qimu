@@ -26,6 +26,18 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 
 `tools/pad_convert.py` 可以把随便一个 AOSP 格式的动画转成能用的：按宽度缩放居中贴到黑底、desc 首行改成目标分辨率、强制不压缩。用之前 `pip install pillow`。
 
+## 导入哪种包
+
+网上下的「开机动画」常见两种，启幕都能吃：
+
+**① 裸动画包** —— 就是 `bootanimation.zip` 本身，根目录直接是 `desc.txt` 加 `part0/` 这些帧目录。直接导入即可。
+
+**② KSU/Magisk 模块包** —— 里面有 `module.prop`、`META-INF/com/google/android/update-binary`、`post-fs-data.sh`，动画被裹在里头一个 `bootanimation.zip` 里。导入时启幕会自动把内层 `bootanimation.zip` 解出来用，你不用自己拆；解出来的动画照样得过「不压缩 + 有 desc.txt」的校验，不过关会告诉你原因。
+
+一眼区分：解压软件看一眼包里有什么——根目录直接看到 `desc.txt` + `part0` 就是 ①；看到 `module.prop` / `META-INF` 就是 ②。
+
+> ② 这种模块包本身是设计成丢进 KernelSU/SukiSU/APatch/Magisk 管理器里「安装模块」刷的（靠开机时 bind-mount 到 `/system/media`）。你想让它当独立模块跑，就用管理器刷；想把它的动画纳入启幕统一管理，就直接导入，启幕只取内层动画。两种机制别同装：启幕走 `/data/system/theme/boots`（HyperOS 优先读这条），模块包走 `/system/media`（优先级更低），两个都装的话启幕的会赢，模块包的动画不会显示。
+
 ## 测过的机器
 
 只有两台：

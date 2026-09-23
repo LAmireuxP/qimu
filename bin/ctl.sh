@@ -331,9 +331,26 @@ cmd_import() {
   src="$1"
   [ -n "$src" ] || { echo "ERROR 未指定文件"; return 1; }
   [ -f "$src" ] || { echo "ERROR 找不到文件: $src"; return 1; }
-  validate_zip "$src" || { echo "ERROR $VALID_MSG"; return 1; }
+
+  # 用原始文件名命名库里的动画（解包后 src 可能变成临时文件，名字得先记下来）
   base=$(sanitize_name "$(name_of "$src")")
   [ -n "$base" ] || base="imported"
+
+  # 「模块壳」包：根目录没有 desc.txt，但内含 bootanimation.zip 条目
+  #   （KSU/Magisk 模块式的开机动画包就是这种结构，动画被裹在一层模块里）
+  #   解出内层 bootanimation.zip 再走正常校验/入库流程
+  inner_tmp=""
+  if ! unzip -l "$src" 2>/dev/null | grep -q 'desc\.txt'; then
+    inner_tmp="$LIB_DIR/.unwrap.$$.tmp"
+    if unzip -p "$src" bootanimation.zip > "$inner_tmp" 2>/dev/null && [ -s "$inner_tmp" ]; then
+      [ "$(dd if="$inner_tmp" bs=2 count=1 2>/dev/null)" = "PK" ] && { log "unwrap module wrapper: $1 -> bootanimation.zip"; src="$inner_tmp"; } || { rm -f "$inner_tmp"; inner_tmp=""; }
+    else
+      rm -f "$inner_tmp" 2>/dev/null
+      inner_tmp=""
+    fi
+  fi
+
+  validate_zip "$src" || { echo "ERROR $VALID_MSG"; rm -f "$inner_tmp" 2>/dev/null; return 1; }
   target="$LIB_DIR/$base.zip"
   n=2
   while [ -e "$target" ]; do target="$LIB_DIR/$base-$n.zip"; n=$((n + 1)); done
@@ -341,10 +358,12 @@ cmd_import() {
   if cp -f "$src" "$tmp" 2>/dev/null && mv -f "$tmp" "$target" 2>/dev/null; then
     chmod 0644 "$target" 2>/dev/null
     normalize_zip "$target" >/dev/null 2>&1     # 非标准 desc.txt 顺手修正（改的是库里的副本）
+    rm -f "$inner_tmp" 2>/dev/null             # 解包临时文件用完即删
     log "imported: $target"
     echo "OK stored=${target##*/}"
   else
     rm -f "$tmp" 2>/dev/null
+    rm -f "$inner_tmp" 2>/dev/null
     echo "ERROR 复制文件失败"
     return 1
   fi
