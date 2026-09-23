@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+# Android shell / 脚本必须 LF，CRLF 会导致 mksh 解析失败
+*.sh text eol=lf
+*.html text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.prop text eol=lf
+*.txt text eol=lf
+
+*.zip binary
+*.png binary
+*.jpg binary

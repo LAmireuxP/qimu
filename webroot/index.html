@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>开机动画管理器</title>
+<script>
+  // 尽早确定主题，避免闪烁：本地设置 + 缓存的系统状态 + prefers-color-scheme 兜底
+  (function () {
+    try {
+      var mode = localStorage.getItem("bootanim_theme") || "auto";
+      var cached = localStorage.getItem("bootanim_sysdark");
+      var prefersDark = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      var prefersLight = !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches);
+      var sysDark = cached === "1" ? true : (cached === "0" ? false : (prefersLight ? false : true));
+      var dark = mode === "dark" || (mode === "auto" && sysDark);
+      document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+    } catch (e) { document.documentElement.setAttribute("data-theme", "dark"); }
+  })();
+</script>
+<style>
+  /* ---------- 深色（默认） ---------- */
+  :root, html[data-theme="dark"]{
+    --bg:#0f1115; --card:#181b22; --card2:#1f232c; --line:#2a2f3a;
+    --fg:#e8eaee; --sub:#9aa3b2; --accent:#4f8cff;
+    --ok:#3ecf8e; --warn:#ffb02e; --err:#ff5c6c;
+    --btn-fg:#ffffff; --toast-bg:#252a34; --danger-line:#4a2a30;
+    --ok-bg:rgba(62,207,142,.15); --err-bg:rgba(255,92,108,.15);
+    --active-bg:rgba(62,207,142,.08); --seg-bg:#12151b;
+    --shadow:none; color-scheme:dark;
+  }
+  /* ---------- 浅色 ---------- */
+  html[data-theme="light"]{
+    --bg:#f2f4f7; --card:#ffffff; --card2:#f7f9fc; --line:#e3e7ef;
+    --fg:#1b1f27; --sub:#6b7484; --accent:#2f6fed;
+    --ok:#0f9d63; --warn:#b8770a; --err:#d93b4c;
+    --btn-fg:#ffffff; --toast-bg:#ffffff; --danger-line:#f2ccd1;
+    --ok-bg:rgba(15,157,99,.12); --err-bg:rgba(217,59,76,.12);
+    --active-bg:rgba(15,157,99,.07); --seg-bg:#e9edf3;
+    --shadow:0 1px 3px rgba(16,24,40,.07); color-scheme:light;
+  }
+
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font:15px/1.6 -apple-system,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;
+    padding:16px 14px calc(28px + env(safe-area-inset-bottom));
+    transition:background .18s ease,color .18s ease;
+  }
+  .head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
+  h1{font-size:19px;margin:0 0 2px}
+  .sub{color:var(--sub);font-size:12.5px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;
+        margin-bottom:13px;box-shadow:var(--shadow);transition:background .18s ease,border-color .18s ease}
+  .card h2{font-size:13.5px;margin:0 0 11px;color:var(--sub);font-weight:600;letter-spacing:.3px}
+  .current{display:flex;align-items:center;gap:12px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:0 0 auto;box-shadow:0 0 8px var(--ok)}
+  .current .name{font-size:17px;font-weight:600;word-break:break-all}
+  .current .meta{color:var(--sub);font-size:12.5px}
+  .row{display:flex;align-items:center;gap:7px;padding:9px 10px;border:1px solid var(--line);
+       border-radius:11px;background:var(--card2);margin-bottom:8px;transition:background .18s ease;
+       -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+  .row.active{border-color:var(--ok);background:var(--active-bg)}
+  .row .info{flex:1;min-width:0}
+  .row .nm{font-weight:600;word-break:break-all;font-size:14px;line-height:1.3}
+  .row .dt{color:var(--sub);font-size:11.5px;margin-top:1px}
+  /* 拖拽排序手柄 */
+  .row .handle{flex:0 0 auto;width:26px;height:38px;display:flex;align-items:center;justify-content:center;
+       color:var(--sub);font-size:17px;letter-spacing:-2px;cursor:grab;touch-action:none;
+       user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;border-radius:8px}
+  .row .handle:active{cursor:grabbing;color:var(--fg)}
+  .row.dragging{border-color:var(--accent);background:var(--card);box-shadow:0 10px 28px rgba(0,0,0,.34);
+       position:relative;z-index:5;will-change:transform;transition:none}
+  .row.dragging .handle{color:var(--accent)}
+  /* 保底排序按钮（WebView 里拖拽不可用时用） */
+  .row .ord{display:flex;flex-direction:column;gap:2px;flex:0 0 auto}
+  .row .ord button{width:24px;height:17px;padding:0;border:1px solid var(--line);background:transparent;
+       color:var(--sub);border-radius:5px;font-size:9px;line-height:1;font-family:inherit}
+  .row .ord button:disabled{opacity:.28}
+  .row .ord button:active:not(:disabled){color:var(--fg);border-color:var(--accent)}
+  .btn{border:0;border-radius:9px;padding:7px 11px;font-size:13px;font-weight:600;
+       background:var(--accent);color:var(--btn-fg);flex:0 0 auto;
+       font-family:inherit;transition:transform .12s ease,opacity .18s ease}
+  .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+  .btn.danger{background:transparent;border:1px solid var(--danger-line);color:var(--err)}
+  .btn:disabled{opacity:.42}
+  .btn:active:not(:disabled){transform:scale(.97)}
+  .toolbar{display:flex;gap:9px;margin-bottom:13px}
+  .toolbar .btn{flex:1;text-align:center;padding:11px}
+  .empty{color:var(--sub);font-size:13.5px;text-align:center;padding:16px 0}
+  .hint{color:var(--sub);font-size:12.5px;margin-top:9px;line-height:1.7}
+  .tag{display:inline-block;font-size:11px;padding:1px 7px;border-radius:20px;
+       background:var(--ok-bg);color:var(--ok);margin-left:7px;vertical-align:1px;font-weight:600}
+  /* ---------- 主题选择（分段控件） ---------- */
+  .seg{display:inline-flex;background:var(--seg-bg);border:1px solid var(--line);border-radius:10px;
+       padding:3px;gap:2px;flex:0 0 auto}
+  .seg button{border:0;background:transparent;color:var(--sub);font-size:12px;font-family:inherit;
+              padding:6px 9px;border-radius:7px;font-weight:600;white-space:nowrap;
+              transition:background .16s ease,color .16s ease}
+  .seg button[aria-pressed="true"]{background:var(--card);color:var(--fg);box-shadow:var(--shadow)}
+  #toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%) translateY(20px);
+         background:var(--toast-bg);border:1px solid var(--line);color:var(--fg);padding:11px 17px;
+         border-radius:11px;font-size:13.5px;max-width:86%;opacity:0;pointer-events:none;
+         transition:opacity .25s ease,transform .25s ease;z-index:9;word-break:break-all;
+         box-shadow:0 6px 22px rgba(0,0,0,.18)}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.ok{border-color:var(--ok)}
+  #toast.err{border-color:var(--err)}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <div>
+    <h1>开机动画管理器</h1>
+    <div class="sub">换开机动画，重启生效</div>
+  </div>
+  <div class="seg" id="theme-seg" role="group" aria-label="主题风格">
+    <button type="button" data-mode="auto">跟随系统</button>
+    <button type="button" data-mode="light">浅色</button>
+    <button type="button" data-mode="dark">深色</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>当前动画</h2>
+  <div class="current">
+    <span class="dot"></span>
+    <div style="min-width:0">
+      <div class="name" id="cur-name">读取中…</div>
+      <div class="meta" id="cur-meta"></div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>动画库</h2>
+  <div id="library"><div class="empty">读取中…</div></div>
+  <div class="hint">点「应用」换动画，重启生效；正在用的那个删不掉。<br>
+    排序：按住左边的 <b>⠿</b> 拖动，或者用 <b>▲▼</b> 一格一格移。<br>
+    选「不播放动画」就是开机黑屏，直接进系统。</div>
+</div>
+
+<div class="toolbar">
+  <button class="btn ghost" id="btn-refresh">刷新</button>
+  <button class="btn ghost" id="btn-scan">扫描可导入文件</button>
+</div>
+
+<div class="card" id="scan-card" style="display:none">
+  <h2>可导入的动画</h2>
+  <div id="scan-list"></div>
+  <div class="hint">把 zip 丢进「下载」目录，点扫描就能导进来。<br>
+    要求：根目录有 desc.txt，而且不能压缩（ZIP_STORED）——压缩过的 bootanimation 不认。</div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const MODDIR = "/data/adb/modules/custom_bootanimation";
+  const CTL = MODDIR + "/bin/ctl.sh";
+  const THEME_KEY = "bootanim_theme";
+  const SYS_KEY = "bootanim_sysdark";
+
+  let busy = false, execMode = "sync", cbSeq = 0;
+  let themeMode = "auto";
+
+  const $ = id => document.getElementById(id);
+  const bridgeReady = () => typeof window.ksu !== "undefined" && typeof window.ksu.exec === "function";
+  const quote = v => "'" + String(v).replace(/'/g, "'\\''") + "'";
+  const ctlCmd = (...a) => [quote(CTL), ...a.map(quote)].join(" ");
+
+  /* ------------------ 主题 ------------------ */
+  const prefersDark = () => !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+
+  function paintTheme(dark) {
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  }
+  function paintSeg() {
+    document.querySelectorAll("#theme-seg button").forEach(b => {
+      b.setAttribute("aria-pressed", b.dataset.mode === themeMode ? "true" : "false");
+    });
+  }
+
+  // 跟随系统时优先问系统真实状态（比 prefers-color-scheme 可靠），失败再退回媒体查询
+  async function detectSystemDark() {
+    if (bridgeReady()) {
+      try {
+        const out = await run("cmd uimode night 2>/dev/null");
+        const m = /night\s*mode\s*:\s*(\w+)/i.exec(String(out || ""));
+        if (m) {
+          if (/^yes/i.test(m[1])) return true;
+          if (/^no/i.test(m[1])) return false;
+        }
+      } catch (_) {}
+      try {
+        const out2 = await run("settings get secure ui_night_mode 2>/dev/null");
+        const v = String(out2 || "").trim();
+        if (v === "2") return true;
+        if (v === "1") return false;
+      } catch (_) {}
+    }
+    return prefersDark();
+  }
+
+  async function applyTheme(refreshSystem) {
+    if (themeMode === "dark") { paintTheme(true); paintSeg(); return; }
+    if (themeMode === "light") { paintTheme(false); paintSeg(); return; }
+    paintSeg();
+    if (refreshSystem) {
+      const dark = await detectSystemDark();
+      try { localStorage.setItem(SYS_KEY, dark ? "1" : "0"); } catch (_) {}
+      paintTheme(dark);
+    } else {
+      paintTheme(prefersDark());
+    }
+  }
+
+  async function setThemeMode(mode) {
+    themeMode = mode;
+    try { localStorage.setItem(THEME_KEY, mode); } catch (_) {}
+    await applyTheme(true);
+  }
+
+  /* ------------------ 通用 ------------------ */
+  function toast(text, kind) {
+    const t = $("toast");
+    t.textContent = text;
+    t.className = "show" + (kind ? " " + kind : "");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { t.className = ""; }, 3200);
+  }
+  function bytes(v) {
+    let n = Number(v);
+    if (!isFinite(n) || n < 0) return "未知大小";
+    const u = ["B", "KB", "MB", "GB"]; let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i ? n.toFixed(n >= 10 ? 0 : 1) : n) + " " + u[i];
+  }
+  function friendly(text) {
+    const line = String(text || "").split(/\r?\n/).find(l => l.trim().startsWith("ERROR ")) || "";
+    let m = line.replace(/^ERROR\s*/, "").trim();
+    if (!m) m = "操作失败，请重试";
+    if (/找不到该动画|invalid animation index/.test(m)) m = "找不到该动画，请刷新后重试";
+    if (/找不到文件/.test(m)) m = "找不到文件，可能已被移动或删除";
+    return m;
+  }
+
+  // 探测 KernelSU 的 exec 调用形式（同步 / 回调）
+  function detectExecMode() {
+    return new Promise(resolve => {
+      let done = false;
+      const settle = mode => { if (!done) { done = true; resolve(mode); } };
+      const tryForm = len => {
+        const name = "__probe_" + Date.now() + "_" + (++cbSeq);
+        const timer = setTimeout(() => { delete window[name]; }, 600);
+        window[name] = () => { clearTimeout(timer); delete window[name]; settle(len === 3 ? "async" : "async2"); };
+        try {
+          const ret = window.ksu.exec.apply(window.ksu, ["echo probe", null, "window." + name].slice(0, len));
+          if (ret !== undefined && ret !== null && !(ret && typeof ret.then === "function")) {
+            clearTimeout(timer); delete window[name]; settle("sync");
+          }
+        } catch (_) { clearTimeout(timer); delete window[name]; settle("sync"); }
+      };
+      tryForm(3);
+      setTimeout(() => { if (!done) tryForm(2); }, 650);
+      setTimeout(() => settle("sync"), 1400);
+    });
+  }
+
+  async function run(text) {
+    if (!bridgeReady()) throw new Error("未检测到 KernelSU / SukiSU 的模块接口，请在模块管理器中打开本页面。");
+    if (execMode === "async" || execMode === "async2") {
+      return new Promise((resolve, reject) => {
+        const name = "__cb_" + (++cbSeq);
+        const timer = setTimeout(() => { delete window[name]; reject(new Error("命令执行超时")); }, 180000);
+        window[name] = (code, stdout) => { clearTimeout(timer); delete window[name]; resolve(stdout == null ? "" : String(stdout)); };
+        try { window.ksu.exec(text, null, "window." + name); }
+        catch (e) { clearTimeout(timer); delete window[name]; reject(e); }
+      });
+    }
+    const v = await Promise.resolve(window.ksu.exec(text));
+    return v == null ? "" : String(v);
+  }
+  const ctl = (...a) => run(ctlCmd(...a));
+
+  async function withBusy(fn) {
+    if (busy) return;
+    busy = true;
+    document.querySelectorAll("button").forEach(b => b.disabled = true);
+    try { await fn(); }
+    catch (e) { toast(e && e.message ? e.message : "操作失败", "err"); }
+    finally {
+      busy = false;
+      document.querySelectorAll("button").forEach(b => b.disabled = false);
+      paintSeg();
+      syncOrderButtons();   // 重新按位置禁用边界行的 ▲ / ▼
+    }
+  }
+
+  /* ------------------ 排序：拖拽（跟手 + 平滑滑动）+ 按钮保底 ------------------ */
+  const HAS_POINTER = typeof window.PointerEvent === "function";
+  const EASE = "cubic-bezier(.22,.72,.28,1)";
+  const SLIDE_MS = 200;
+  let drag = null;   // { row, box, offset, lastY, moved, onMove, onUp }
+
+  function rowNames(box) {
+    return Array.from(box.querySelectorAll(".row")).map(r => r.dataset.name).filter(Boolean);
+  }
+
+  // 只做轻量同步（不整表重建），避免拖完瞬间被 refresh 重画打断动画
+  async function persistOrder(box) {
+    const names = rowNames(box);
+    if (!names.length) return;
+    await withBusy(async () => {
+      const res = await ctl("order", ...names);
+      if (/OK /.test(res)) { toast("排序已保存", "ok"); syncOrderButtons(); }
+      else { toast(friendly(res), "err"); await refresh(); }   // 失败则回到真实顺序
+    });
+  }
+
+  function pointY(e) {
+    if (e.touches && e.touches.length) return e.touches[0].clientY;
+    if (e.changedTouches && e.changedTouches.length) return e.changedTouches[0].clientY;
+    return e.clientY;
+  }
+
+  // FLIP：记录改动前各行的位置，改动后用 transform 从旧位置平滑滑到新位置
+  function captureRects(box) {
+    const m = new Map();
+    const skip = drag && drag.row;
+    box.querySelectorAll(".row").forEach(r => { if (r !== skip) m.set(r, r.getBoundingClientRect().top); });
+    return m;
+  }
+  function playFlip(box, before) {
+    const skip = drag && drag.row;
+    box.querySelectorAll(".row").forEach(r => {
+      if (r === skip) return;
+      const b = before.get(r);
+      if (b == null) return;
+      const dy = b - r.getBoundingClientRect().top;
+      if (Math.abs(dy) < 0.5) return;
+      r.style.transition = "none";
+      r.style.transform = `translateY(${dy}px)`;
+      void r.offsetHeight;                                    // 强制 reflow，让起始态生效
+      r.style.transition = `transform ${SLIDE_MS}ms ${EASE}`;
+      r.style.transform = "";
+    });
+  }
+
+  // 落点判断：只比较「指针 Y」与「其他各行中线」——
+  // 不依赖 setPointerCapture（失败就没事件），也不依赖 elementFromPoint（拖拽行自己会被返回）
+  function reorderTo(clientY) {
+    if (!drag) return;
+    const { row, box } = drag;
+    const others = Array.from(box.querySelectorAll(".row")).filter(r => r !== row);
+    let anchor = null;
+    for (const o of others) {
+      const r = o.getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) { anchor = o; break; }
+    }
+    if (anchor ? row.nextElementSibling === anchor : box.lastElementChild === row) return;   // 位置没变
+
+    const before = captureRects(box);
+    const topBefore = row.getBoundingClientRect().top;
+    if (anchor) box.insertBefore(row, anchor); else box.appendChild(row);
+    const topAfter = row.getBoundingClientRect().top;
+    // 插入后布局位置变了：补偿 transform，使被拖动行的视觉位置不跳
+    drag.offset += (topBefore - topAfter);
+    row.style.transform = `translateY(${drag.offset}px)`;
+    playFlip(box, before);
+  }
+
+  function endDrag() {
+    if (!drag) return;
+    const { row, onMove, onUp, moved, box } = drag;
+    ["pointermove", "pointerup", "pointercancel", "touchmove", "touchend", "touchcancel", "mousemove", "mouseup"]
+      .forEach(t => { document.removeEventListener(t, onMove); document.removeEventListener(t, onUp); });
+    row.classList.remove("dragging");
+    row.style.transition = `transform ${SLIDE_MS}ms ${EASE}`;
+    row.style.transform = "";                                  // 缓入归位
+    setTimeout(() => { row.style.transition = ""; row.style.transform = ""; }, SLIDE_MS + 40);
+    drag = null;
+    if (moved) persistOrder(box);
+  }
+
+  function attachDragHandle(handle, row, box) {
+    const onDown = e => {
+      if (busy || drag) return;
+      const y0 = pointY(e);
+      if (typeof y0 !== "number") return;
+      drag = { row, box, offset: 0, lastY: y0, moved: false, onMove: null, onUp: null };
+      row.classList.add("dragging");
+
+      const onMove = ev => {
+        if (!drag) return;
+        const y = pointY(ev);
+        if (typeof y !== "number") return;
+        if (ev.cancelable) ev.preventDefault();
+        drag.moved = true;
+        drag.offset += (y - drag.lastY);                        // 跟手
+        drag.lastY = y;
+        row.style.transform = `translateY(${drag.offset}px)`;
+        reorderTo(y);                                           // 越过中线则换位（其他行滑过去）
+      };
+      const onUp = () => endDrag();
+      drag.onMove = onMove;
+      drag.onUp = onUp;
+
+      if (HAS_POINTER) {
+        document.addEventListener("pointermove", onMove, { passive: false });
+        document.addEventListener("pointerup", onUp);
+        document.addEventListener("pointercancel", onUp);
+      }
+      // 触屏 / 鼠标各接一份：即使某个 WebView 不派发 pointer 事件也能拖
+      document.addEventListener("touchmove", onMove, { passive: false });
+      document.addEventListener("touchend", onUp);
+      document.addEventListener("touchcancel", onUp);
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      if (e.cancelable) e.preventDefault();
+    };
+    handle.addEventListener(HAS_POINTER ? "pointerdown" : "touchstart", onDown, { passive: false });
+    handle.addEventListener("mousedown", onDown);
+  }
+
+  // ▲▼ 按钮：与拖拽等价的可靠排序路径（同样带滑动动画）
+  function attachOrderButtons(up, down, row, box) {
+    up.onclick = () => {
+      const prev = row.previousElementSibling;
+      if (!prev || !prev.classList || !prev.classList.contains("row")) return;
+      const before = captureRects(box);
+      box.insertBefore(row, prev);
+      playFlip(box, before);
+      persistOrder(box);
+    };
+    down.onclick = () => {
+      const next = row.nextElementSibling;
+      if (!next || !next.classList || !next.classList.contains("row")) return;
+      const before = captureRects(box);
+      box.insertBefore(next, row);
+      playFlip(box, before);
+      persistOrder(box);
+    };
+  }
+
+  // 按 DOM 实际位置同步 ▲▼ 禁用态。
+  // 必须在 withBusy 结束后重新调用：withBusy 的 finally 会无条件启用所有 button。
+  function syncOrderButtons() {
+    const box = document.getElementById("library");
+    if (!box) return;
+    const rows = Array.from(box.querySelectorAll(".row"));
+    rows.forEach((r, i) => {
+      const btns = r.querySelectorAll(".ord button");
+      if (btns.length !== 2) return;
+      btns[0].disabled = i === 0;
+      btns[1].disabled = i === rows.length - 1;
+    });
+  }
+
+  /* ------------------ 数据 ------------------ */
+  async function refresh() {
+    // 一次 exec 同时拿 status + list（info 命令），省掉一次桥往返
+    const raw = String(await ctl("info"));
+    const at = raw.indexOf("\n##LIST\n");
+    const st = at >= 0 ? raw.slice(0, at) : raw;
+    const ls = at >= 0 ? raw.slice(at + 8) : "";
+
+    const props = {};
+    st.split(/\r?\n/).forEach(l => { const i = l.indexOf("="); if (i > 0) props[l.slice(0, i)] = l.slice(i + 1); });
+
+    $("cur-name").textContent = props.active || "无";
+    $("cur-meta").textContent = props.theme_ok === "yes"
+      ? "已写入主题路径，重启生效 · " + bytes(props.theme_size)
+      : "还没写入，切个动画就会写";
+
+    const rows = String(ls).split(/\r?\n/).filter(l => l.trim());
+    const box = $("library");
+    if (!rows.length) { box.innerHTML = '<div class="empty">动画库为空</div>'; return; }
+    box.innerHTML = "";
+    rows.forEach(line => {
+      const p = line.split("\t");
+      if (p.length < 5) return;
+      const [idx, name, size, active, info] = p;
+      const row = document.createElement("div");
+      row.className = "row" + (active === "yes" ? " active" : "");
+      row.dataset.name = name;
+
+      // 拖拽手柄（按住上下拖动可自定义排序）
+      const handle = document.createElement("div");
+      handle.className = "handle";
+      handle.textContent = "⠿";
+      handle.title = "按住拖动排序";
+      row.appendChild(handle);
+      attachDragHandle(handle, row, box);
+
+      const left = document.createElement("div");
+      left.className = "info";
+      const nmEl = document.createElement("div"); nmEl.className = "nm"; nmEl.textContent = name;
+      const dtEl = document.createElement("div"); dtEl.className = "dt";
+      dtEl.textContent = bytes(size).replace(" ", "") + (info ? " · " + info.replace(" · ", " ") : "");
+      if (active === "yes") {
+        const tag = document.createElement("span"); tag.className = "tag"; tag.textContent = "使用中";
+        dtEl.appendChild(tag);
+      }
+      left.appendChild(nmEl); left.appendChild(dtEl);
+      row.appendChild(left);
+
+      // ▲▼ 保底排序（WebView 里拖拽失灵时用这个）
+      const ord = document.createElement("div");
+      ord.className = "ord";
+      const up = document.createElement("button");
+      up.type = "button"; up.textContent = "▲"; up.title = "上移";
+      const down = document.createElement("button");
+      down.type = "button"; down.textContent = "▼"; down.title = "下移";
+      ord.appendChild(up); ord.appendChild(down);
+      row.appendChild(ord);
+      attachOrderButtons(up, down, row, box);
+
+      const apply = document.createElement("button");
+      apply.className = "btn";
+      apply.textContent = active === "yes" ? "已应用" : "应用";
+      apply.disabled = active === "yes";
+      apply.onclick = () => withBusy(async () => {
+        const r = await ctl("select", idx);
+        if (/OK /.test(r)) { toast("已切换到 " + name + "，重启后生效", "ok"); await refresh(); }
+        else toast(friendly(r), "err");
+      });
+      row.appendChild(apply);
+
+      if (active !== "yes") {
+        const del = document.createElement("button");
+        del.className = "btn danger";
+        del.textContent = "删除";
+        del.onclick = () => withBusy(async () => {
+          const r = await ctl("delete", idx);
+          if (/OK /.test(r)) { toast("已删除 " + name, "ok"); await refresh(); }
+          else toast(friendly(r), "err");
+        });
+        row.appendChild(del);
+      }
+      box.appendChild(row);
+    });
+    syncOrderButtons();
+  }
+
+  async function scan() {
+    const out = await ctl("scan");
+    const rows = String(out).split(/\r?\n/).filter(l => l.trim());
+    const card = $("scan-card"), box = $("scan-list");
+    card.style.display = "";
+    if (!rows.length) { box.innerHTML = '<div class="empty">没有找到可导入的 zip 文件</div>'; return; }
+    box.innerHTML = "";
+    rows.forEach(line => {
+      const [path, size, ok] = line.split("\t");
+      const row = document.createElement("div");
+      row.className = "row";
+      const left = document.createElement("div");
+      left.className = "info";
+      const nmEl = document.createElement("div"); nmEl.className = "nm"; nmEl.textContent = path;
+      const dtEl = document.createElement("div"); dtEl.className = "dt";
+      dtEl.textContent = bytes(size) + (ok === "yes" ? "" : " · 格式不合格（需 STORED 无压缩）");
+      left.appendChild(nmEl); left.appendChild(dtEl);
+      row.appendChild(left);
+      const btn = document.createElement("button");
+      btn.className = "btn";
+      btn.textContent = "导入";
+      btn.disabled = ok !== "yes";
+      btn.onclick = () => withBusy(async () => {
+        const r = await ctl("import", path);
+        if (/OK /.test(r)) { toast("已导入 " + (r.split("=")[1] || ""), "ok"); await scan(); await refresh(); }
+        else toast(friendly(r), "err");
+      });
+      row.appendChild(btn);
+      box.appendChild(row);
+    });
+  }
+
+  /* ------------------ 启动 ------------------ */
+  async function boot() {
+    try { themeMode = localStorage.getItem(THEME_KEY) || "auto"; } catch (_) { themeMode = "auto"; }
+    await applyTheme(true);
+
+    if (!bridgeReady()) { toast("未检测到 KernelSU 模块接口，无法读取动画列表", "err"); return; }
+    execMode = await detectExecMode();
+    await withBusy(refresh);
+  }
+
+  $("theme-seg").addEventListener("click", e => {
+    const b = e.target.closest("button[data-mode]");
+    if (b) setThemeMode(b.dataset.mode);
+  });
+  $("btn-refresh").onclick = () => withBusy(refresh);
+  $("btn-scan").onclick = () => withBusy(scan);
+
+  // 跟随系统时：系统切换深/浅色后同步（重新打开界面或系统主题变化时）
+  if (window.matchMedia) {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => { if (themeMode === "auto") applyTheme(true); };
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && themeMode === "auto") applyTheme(true);
+  });
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+</script>
+</body>
+</html>
