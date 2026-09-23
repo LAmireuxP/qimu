@@ -98,6 +98,9 @@
               padding:6px 9px;border-radius:7px;font-weight:600;white-space:nowrap;
               transition:background .16s ease,color .16s ease}
   .seg button[aria-pressed="true"]{background:var(--card);color:var(--fg);box-shadow:var(--shadow)}
+  .path{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--sub);
+        background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;
+        margin-bottom:10px;word-break:break-all}
   #toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%) translateY(20px);
          background:var(--toast-bg);border:1px solid var(--line);color:var(--fg);padding:11px 17px;
          border-radius:11px;font-size:13.5px;max-width:86%;opacity:0;pointer-events:none;
@@ -143,7 +146,8 @@
 
 <div class="toolbar">
   <button class="btn ghost" id="btn-refresh">刷新</button>
-  <button class="btn ghost" id="btn-scan">扫描可导入文件</button>
+  <button class="btn ghost" id="btn-scan">扫描目录</button>
+  <button class="btn ghost" id="btn-browse">选择文件</button>
 </div>
 
 <div class="card" id="scan-card" style="display:none">
@@ -151,6 +155,14 @@
   <div id="scan-list"></div>
   <div class="hint">把 zip 丢进「下载」目录，点扫描就能导进来。<br>
     要求：根目录有 desc.txt，而且不能压缩（ZIP_STORED）——压缩过的 bootanimation 不认。</div>
+</div>
+
+<div class="card" id="browse-card" style="display:none">
+  <h2>选择文件</h2>
+  <div class="path" id="browse-path">/sdcard</div>
+  <div id="browse-list"></div>
+  <div class="hint">点文件夹进去翻，找到动画 zip 点右边的「导入」。<br>
+    换目录时用第一行的「⬆ 上一级」，或者点「选择文件」重新从「下载」目录开始。</div>
 </div>
 
 <div id="toast"></div>
@@ -578,6 +590,73 @@
     });
   }
 
+  /* ------------------ 自己选文件 ------------------ */
+  let browsePath = "/sdcard";
+
+  async function browse(path) {
+    let out;
+    try { out = String(await ctl("ls", path)); }
+    catch (e) { toast("读取目录失败", "err"); return; }
+    if (/^\s*ERROR/.test(out)) { toast(friendly(out), "err"); return; }   // 失败时保留原列表
+
+    browsePath = path;
+    $("browse-path").textContent = path;
+    $("browse-card").style.display = "";
+
+    const rows = out.split(/\r?\n/).filter(l => l.trim());
+    const box = $("browse-list");
+    box.innerHTML = "";
+
+    // 上一级（走到允许的根就不再给）
+    const atRoot = ["/", "/sdcard", "/storage", "/data/local/tmp", "/mnt/media_rw"].indexOf(path) >= 0;
+    if (!atRoot) {
+      const up = document.createElement("div");
+      up.className = "row";
+      const ui2 = document.createElement("div");
+      ui2.className = "info";
+      const un = document.createElement("div"); un.className = "nm"; un.textContent = "⬆ 上一级";
+      ui2.appendChild(un); up.appendChild(ui2);
+      up.onclick = () => withBusy(() => browse(path.replace(/\/[^/]+$/, "") || "/"));
+      box.appendChild(up);
+    }
+
+    if (!rows.length) {
+      const e = document.createElement("div"); e.className = "empty";
+      e.textContent = "这个目录里没有子文件夹或 zip";
+      box.appendChild(e);
+      return;
+    }
+
+    rows.forEach(line => {
+      const p = line.split("\t");
+      const row = document.createElement("div");
+      row.className = "row";
+      const info = document.createElement("div");
+      info.className = "info";
+      const nm = document.createElement("div"); nm.className = "nm";
+      const dt = document.createElement("div"); dt.className = "dt";
+      if (p[0] === "D") {
+        nm.textContent = "📁 " + p[1];
+        dt.textContent = "文件夹";
+        row.appendChild(info); info.appendChild(nm); info.appendChild(dt);
+        row.onclick = () => withBusy(() => browse(p[2]));
+      } else {
+        nm.textContent = p[1];
+        dt.textContent = bytes(p[2]);
+        row.appendChild(info); info.appendChild(nm); info.appendChild(dt);
+        const b = document.createElement("button");
+        b.className = "btn"; b.textContent = "导入";
+        b.onclick = () => withBusy(async () => {
+          const r = await ctl("import", p[3]);
+          if (/OK /.test(r)) { toast("已导入 " + (r.split("=")[1] || ""), "ok"); await refresh(); }
+          else toast(friendly(r), "err");
+        });
+        row.appendChild(b);
+      }
+      box.appendChild(row);
+    });
+  }
+
   /* ------------------ 启动 ------------------ */
   async function boot() {
     try { themeMode = localStorage.getItem(THEME_KEY) || "auto"; } catch (_) { themeMode = "auto"; }
@@ -594,6 +673,7 @@
   });
   $("btn-refresh").onclick = () => withBusy(refresh);
   $("btn-scan").onclick = () => withBusy(scan);
+  $("btn-browse").onclick = () => withBusy(() => browse("/sdcard/Download"));
 
   // 跟随系统时：系统切换深/浅色后同步（重新打开界面或系统主题变化时）
   if (window.matchMedia) {

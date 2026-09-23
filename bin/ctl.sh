@@ -328,6 +328,30 @@ cmd_scan() {
   done
 }
 
+# 列目录，给界面里「选择文件」用（用户可以自己翻到动画放的位置）
+# 用法: ctl.sh ls [目录]
+# 输出: D<tab>名字<tab>路径         子目录
+#       F<tab>文件名<tab>大小<tab>路径   zip
+cmd_ls() {
+  d="$1"
+  [ -n "$d" ] || d="/sdcard"
+  case "$d" in
+    /sdcard|/sdcard/*|/storage|/storage/*|/mnt/media_rw|/mnt/media_rw/*|/data/local/tmp|/data/local/tmp/*) ;;
+    *) echo "ERROR 这个路径不让浏览：$d"; return 1 ;;
+  esac
+  [ -d "$d" ] || { echo "ERROR 没有这个目录：$d"; return 1; }
+  ls -1 "$d" 2>/dev/null | sort | while IFS= read -r x; do
+    [ -n "$x" ] || continue
+    case "$x" in .*) continue ;; esac
+    p="$d/$x"
+    if [ -d "$p" ]; then
+      printf 'D\t%s\t%s\n' "$x" "$p"
+    elif [ -f "$p" ]; then
+      case "$x" in *.zip|*.ZIP) printf 'F\t%s\t%s\t%s\n' "$x" "$(file_size "$p")" "$p" ;; esac
+    fi
+  done
+}
+
 cmd_reset() {
   first=$(entry_paths | head -1)
   if [ -z "$first" ]; then echo "ERROR 动画库为空"; return 1; fi
@@ -364,10 +388,11 @@ case "$1" in
   import) cmd_import "$2" ;;
   delete) cmd_delete "$2" ;;
   scan) cmd_scan ;;
+  ls) cmd_ls "$2" ;;
   reset) cmd_reset ;;
   order) shift; cmd_order "$@" ;;
   guard) install_guard && echo "OK guard installed" ;;
   unguard) remove_guard && echo "OK guard removed" ;;
   deploy) deploy_active && echo "OK deployed" ;;
-  *) echo "用法: $0 {list|status|info|select N|import PATH|delete N|scan|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
+  *) echo "用法: $0 {list|status|info|select N|import PATH|delete N|scan|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
 esac

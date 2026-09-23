@@ -21,7 +21,7 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 ## 用法
 
 1. 进界面，点某个动画的「应用」，重启
-2. 加自己的动画：zip 得是 **ZIP_STORED 不压缩**、根目录有 `desc.txt`，放进「下载」目录后点扫描导入。格式不对界面会告诉你原因
+2. 加自己的动画：zip 得是 **ZIP_STORED 不压缩**、根目录有 `desc.txt`，放进「下载」目录后点「扫描目录」，或者点「选择文件」自己翻到它所在的位置导入。格式不对界面会告诉你原因
 3. 动画都放在 `/data/adb/bootanims/`，当前选的是哪个记在 `var/state/selected.txt`
 
 `tools/pad_convert.py` 可以把随便一个 AOSP 格式的动画转成能用的：按宽度缩放居中贴到黑底、desc 首行改成目标分辨率、强制不压缩。用之前 `pip install pillow`。
