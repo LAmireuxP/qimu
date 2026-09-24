@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # 开机动画管理器 - 控制脚本
-# 用法: ctl.sh {list|status|info|select N|import PATH|delete N|scan|reset|order NAME...|guard|unguard|deploy}
+# 用法: ctl.sh {list|status|info|select N|fit N|import PATH|delete N|scan|reset|order NAME...|guard|unguard|deploy}
 #
 # 几处踩过坑的地方，改的时候注意：
 #   - 动画库列表每次运行只枚举一次，order.txt 一次读进来用纯 shell 比较，
@@ -112,6 +112,49 @@ EOF
   return 0
 }
 
+# ---------- 适配本机分辨率 ----------
+# 动画 desc.txt 首行的「宽 高」就是 bootanimation 实际渲染的尺寸：比屏幕小 → 四周黑边，
+# 比屏幕大 → 被裁掉一圈。把它改成屏幕物理分辨率（帧率保留）就能满屏。
+# 和 normalize_zip 一样只能「等长原地覆盖」——新串比原串长就改不了（设备上没有重建 zip 的工具）。
+screen_wh() {
+  wm size 2>/dev/null | sed -n 's/.*Physical size: *\([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1 \2/p' | head -1
+}
+
+fit_zip() {
+  fz="$1"; [ -f "$fz" ] || return 1
+  wh=$(screen_wh); [ -n "$wh" ] || return 1
+  tw=${wh%% *}; th=${wh##* }
+  desc=$(unzip -p "$fz" desc.txt 2>/dev/null | tr -d '\r') || return 1
+  [ -n "$desc" ] || return 1
+
+  line=""
+  while IFS= read -r ln; do
+    case "$ln" in ''|'#'*) continue ;; *) line="$ln"; break ;; esac
+  done <<EOF
+$desc
+EOF
+  [ -n "$line" ] || return 1
+
+  set -- $line
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac      # 非数字（比如还没归一化的 g 行）交给 normalize
+  case "$2" in ''|*[!0-9]*) return 1 ;; esac
+  case "$3" in ''|*[!0-9]*) fps=30 ;; *) fps=$3 ;; esac
+  [ "$1 $2 $fps" = "$tw $th $fps" ] && return 0   # 已经是本机分辨率
+
+  new="$tw $th $fps"
+  len=${#line}
+  pad=$(( len - ${#new} ))
+  [ "$pad" -ge 0 ] || return 1                    # 变长改不了 → 调用方报错
+  repl=$(printf "%s%*s" "$new" "$pad" "")
+
+  off=$(grep -abo "$line" "$fz" 2>/dev/null | head -1 | cut -d: -f1)
+  [ -n "$off" ] || return 1
+  printf '%s' "$repl" | dd of="$fz" bs=1 seek="$off" conv=notrunc 2>/dev/null || return 1
+  rm -f "$STAMP_FILE" 2>/dev/null                 # 等长改动 stamp 看不出来
+  log "fitted desc: $line -> $new ($fz)"
+  return 0
+}
+
 # ---------- 动画库列表（每次运行只枚举一次） ----------
 ENTRIES_INIT=""
 ENTRIES=""
@@ -213,6 +256,8 @@ deploy_active() {
   an=$(active_name)
   # 顺手修正非标准的 desc.txt；改过就会清掉 stamp，下面自然重新拷贝一次
   normalize_zip "$ap" >/dev/null 2>&1
+  # 顺手把 desc 宽高适配到本机屏幕，避免黑边/裁切（改不了就保持原样）
+  fit_zip "$ap" >/dev/null 2>&1
   new_size=$(file_size "$ap")
   stamp_val="$an:$new_size"
 
@@ -323,6 +368,31 @@ cmd_select() {
     echo "OK selected=$n"
   else
     echo "ERROR 动画已选择，但写入主题路径失败"
+    return 1
+  fi
+}
+
+# 手动把某个动画的 desc 适配到本机分辨率（部署时也会自动做，这里给排障/单独调用用）
+cmd_fit() {
+  idx="$1"
+  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: fit N"; return 1;; esac
+  p=$(entry_at "$idx")
+  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
+  wh=$(screen_wh)
+  [ -n "$wh" ] || { echo "ERROR 读不到本机分辨率"; return 1; }
+  n=$(name_of "$p")
+  if fit_zip "$p"; then
+    if [ "$n" = "$(active_name)" ]; then
+      if deploy_active >/dev/null 2>&1; then
+        echo "OK fitted=$n to=${wh%% *}x${wh##* } (redeployed)"
+      else
+        echo "OK fitted=$n to=${wh%% *}x${wh##* } (但重新部署失败)"
+      fi
+    else
+      echo "OK fitted=$n to=${wh%% *}x${wh##* }"
+    fi
+  else
+    echo "ERROR 适配失败：新分辨率串比原来的长，或 desc 不是标准格式"
     return 1
   fi
 }
@@ -453,6 +523,7 @@ case "$1" in
   status) cmd_status ;;
   info) cmd_info ;;
   select) cmd_select "$2" ;;
+  fit) cmd_fit "$2" ;;
   import) cmd_import "$2" ;;
   delete) cmd_delete "$2" ;;
   scan) cmd_scan ;;
@@ -462,5 +533,5 @@ case "$1" in
   guard) install_guard && echo "OK guard installed" ;;
   unguard) remove_guard && echo "OK guard removed" ;;
   deploy) deploy_active && echo "OK deployed" ;;
-  *) echo "用法: $0 {list|status|info|select N|import PATH|delete N|scan|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
+  *) echo "用法: $0 {list|status|info|select N|fit N|import PATH|delete N|scan|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
 esac
