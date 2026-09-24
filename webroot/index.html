@@ -287,7 +287,7 @@
     if (execMode === "async" || execMode === "async2") {
       return new Promise((resolve, reject) => {
         const name = "__cb_" + (++cbSeq);
-        const timer = setTimeout(() => { delete window[name]; reject(new Error("命令执行超时")); }, 180000);
+        const timer = setTimeout(() => { delete window[name]; reject(new Error("命令执行超时")); }, 60000);
         window[name] = (code, stdout) => { clearTimeout(timer); delete window[name]; resolve(stdout == null ? "" : String(stdout)); };
         try { window.ksu.exec(text, null, "window." + name); }
         catch (e) { clearTimeout(timer); delete window[name]; reject(e); }
@@ -301,12 +301,15 @@
   async function withBusy(fn) {
     if (busy) return;
     busy = true;
-    document.querySelectorAll("button").forEach(b => b.disabled = true);
+    // 只记下「本来可用」的按钮，结束后只恢复这些——不能无条件全启用，
+    // 否则会把「已应用」「格式不合格」这些语义禁用态一起清掉。
+    const touched = Array.from(document.querySelectorAll("button:not(:disabled)"));
+    touched.forEach(b => b.disabled = true);
     try { await fn(); }
     catch (e) { toast(e && e.message ? e.message : "操作失败", "err"); }
     finally {
       busy = false;
-      document.querySelectorAll("button").forEach(b => b.disabled = false);
+      touched.forEach(b => b.disabled = false);
       paintSeg();
       syncOrderButtons();   // 重新按位置禁用边界行的 ▲ / ▼
     }
@@ -322,13 +325,19 @@
     return Array.from(box.querySelectorAll(".row")).map(r => r.dataset.name).filter(Boolean);
   }
 
+  // shell 是按 order.txt 重新编号的，所以换序后必须按 DOM 实际位置刷新每行的编号，
+  // 否则「应用 / 删除」会用到过期的编号 → 套错动画 / 删错文件。
+  function renumber(box) {
+    Array.from(box.querySelectorAll(".row")).forEach((r, i) => { r.dataset.idx = String(i + 1); });
+  }
+
   // 只做轻量同步（不整表重建），避免拖完瞬间被 refresh 重画打断动画
   async function persistOrder(box) {
     const names = rowNames(box);
     if (!names.length) return;
     await withBusy(async () => {
       const res = await ctl("order", ...names);
-      if (/OK /.test(res)) { toast("排序已保存", "ok"); syncOrderButtons(); }
+      if (/OK /.test(res)) { toast("排序已保存", "ok"); renumber(box); syncOrderButtons(); }
       else { toast(friendly(res), "err"); await refresh(); }   // 失败则回到真实顺序
     });
   }
@@ -411,11 +420,13 @@
         const y = pointY(ev);
         if (typeof y !== "number") return;
         if (ev.cancelable) ev.preventDefault();
-        drag.moved = true;
         drag.offset += (y - drag.lastY);                        // 跟手
         drag.lastY = y;
         row.style.transform = `translateY(${drag.offset}px)`;
+        const prevBefore = row.previousElementSibling;
         reorderTo(y);                                           // 越过中线则换位（其他行滑过去）
+        // 只有真的换过位才算「排序」——手指抖一下就写一次 order.txt 是白费
+        if (row.previousElementSibling !== prevBefore) drag.moved = true;
       };
       const onUp = () => endDrag();
       drag.onMove = onMove;
@@ -474,31 +485,41 @@
 
   /* ------------------ 数据 ------------------ */
   async function refresh() {
+    const box = $("library");
     // 一次 exec 同时拿 status + list（info 命令），省掉一次桥往返
-    const raw = String(await ctl("info"));
+    const raw = String(await ctl("info")).replace(/\r\n/g, "\n");
     const at = raw.indexOf("\n##LIST\n");
-    const st = at >= 0 ? raw.slice(0, at) : raw;
-    const ls = at >= 0 ? raw.slice(at + 8) : "";
+    // 输出不像 info 的成功结果（命令报错 / 没拿到 ##LIST）→ 报错并保留上次渲染，
+    // 不能当成「库是空的」——那会让用户以为动画都丢了。
+    if (at < 0) {
+      toast(friendly(raw), "err");
+      if (!box.querySelector(".row")) box.innerHTML = '<div class="empty">读取失败，点「刷新」重试</div>';
+      return;
+    }
+    const st = raw.slice(0, at);
+    const ls = raw.slice(at + 8);
 
     const props = {};
-    st.split(/\r?\n/).forEach(l => { const i = l.indexOf("="); if (i > 0) props[l.slice(0, i)] = l.slice(i + 1); });
+    st.split("\n").forEach(l => { const i = l.indexOf("="); if (i > 0) props[l.slice(0, i)] = l.slice(i + 1); });
 
     $("cur-name").textContent = props.active || "无";
     $("cur-meta").textContent = props.theme_ok === "yes"
       ? "已写入主题路径，重启生效 · " + bytes(props.theme_size)
       : "还没写入，切个动画就会写";
 
-    const rows = String(ls).split(/\r?\n/).filter(l => l.trim());
-    const box = $("library");
+    const rows = ls.split("\n").filter(l => l.trim());
     if (!rows.length) { box.innerHTML = '<div class="empty">动画库为空</div>'; return; }
     box.innerHTML = "";
     rows.forEach(line => {
       const p = line.split("\t");
       if (p.length < 5) return;
-      const [idx, name, size, active, info] = p;
+      // 名字里万一带 tab 会把字段挤位：固定取头一个和末尾三个，中间的全算名字
+      const idx = p[0], name = p.slice(1, -3).join("\t");
+      const size = p[p.length - 3], active = p[p.length - 2], info = p[p.length - 1];
       const row = document.createElement("div");
       row.className = "row" + (active === "yes" ? " active" : "");
       row.dataset.name = name;
+      row.dataset.idx = idx;
 
       // 拖拽手柄（按住上下拖动可自定义排序）
       const handle = document.createElement("div");
@@ -536,7 +557,8 @@
       apply.textContent = active === "yes" ? "已应用" : "应用";
       apply.disabled = active === "yes";
       apply.onclick = () => withBusy(async () => {
-        const r = await ctl("select", idx);
+        // 编号现读，不用闭包里的：排序后 shell 会按 order.txt 重新编号
+        const r = await ctl("select", row.dataset.idx);
         if (/OK /.test(r)) { toast("已切换到 " + name + "，重启后生效", "ok"); await refresh(); }
         else toast(friendly(r), "err");
       });
@@ -547,7 +569,8 @@
         del.className = "btn danger";
         del.textContent = "删除";
         del.onclick = () => withBusy(async () => {
-          const r = await ctl("delete", idx);
+          // 同上：编号现读，否则排序后会删错文件
+          const r = await ctl("delete", row.dataset.idx);
           if (/OK /.test(r)) { toast("已删除 " + name, "ok"); await refresh(); }
           else toast(friendly(r), "err");
         });
@@ -582,7 +605,7 @@
       btn.disabled = ok !== "yes";
       btn.onclick = () => withBusy(async () => {
         const r = await ctl("import", path);
-        if (/OK /.test(r)) { toast("已导入 " + (r.split("=")[1] || ""), "ok"); await scan(); await refresh(); }
+        if (/OK /.test(r)) { toast("已导入 " + (r.slice(r.indexOf("=") + 1) || ""), "ok"); await scan(); await refresh(); }
         else toast(friendly(r), "err");
       });
       row.appendChild(btn);
@@ -648,7 +671,7 @@
         b.className = "btn"; b.textContent = "导入";
         b.onclick = () => withBusy(async () => {
           const r = await ctl("import", p[3]);
-          if (/OK /.test(r)) { toast("已导入 " + (r.split("=")[1] || ""), "ok"); await refresh(); }
+          if (/OK /.test(r)) { toast("已导入 " + (r.slice(r.indexOf("=") + 1) || ""), "ok"); await refresh(); }
           else toast(friendly(r), "err");
         });
         row.appendChild(b);
@@ -660,10 +683,12 @@
   /* ------------------ 启动 ------------------ */
   async function boot() {
     try { themeMode = localStorage.getItem(THEME_KEY) || "auto"; } catch (_) { themeMode = "auto"; }
+    // 先探测桥的调用形式：applyTheme 会 exec 问系统深浅色，而探测前 execMode 还是默认的
+    // "sync"，在回调式桥上会拿到空结果、把「跟随系统」判错。
+    if (bridgeReady()) execMode = await detectExecMode();
     await applyTheme(true);
 
     if (!bridgeReady()) { toast("未检测到 KernelSU 模块接口，无法读取动画列表", "err"); return; }
-    execMode = await detectExecMode();
     await withBusy(refresh);
   }
 

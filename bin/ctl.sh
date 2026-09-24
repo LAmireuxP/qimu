@@ -66,91 +66,65 @@ validate_zip() {
   return 0
 }
 
-# ---------- 修正非标准的 desc.txt ----------
-# 小米那套动画会在 desc.txt 里用「g 宽 高 偏移x 偏移y 帧率」这种写法，
-# AOSP 的 bootanimation 不认这行，会直接放弃 → 开机黑屏（真机上验证过）。
-# 这里把它改成标准的「宽 高 帧率」。
-#
-# 做法：用 grep -abo 找到那一行在 zip 里的字节偏移，用「等长的内容」原地覆盖。
-# 长度不变，zip 的头和中央目录都不用动。改完 CRC 会和实际内容对不上，
-# 但 bootanimation 读 STORED 条目是直接拷贝、不校验 CRC，所以照常能播（已验证）。
-normalize_zip() {
-  nz="$1"
-  [ -f "$nz" ] || return 1
-  desc=$(unzip -p "$nz" desc.txt 2>/dev/null | tr -d '\r') || return 1
-  [ -n "$desc" ] || return 1
+# ---------- desc.txt 首行改写 ----------
+# 归一化与分辨率适配都落在 desc.txt 的第一个有效行上，而且都只能「等长原地覆盖」——
+# 设备上没有能重建 zip 的工具（toybox/busybox 都没有 zip 子命令），新内容不能比原行长。
+# 副作用：CRC 与实际内容对不上，但 bootanim 读 STORED 条目是直接 memcpy、不校验 CRC，
+# 照常播放（真机验证过）。原地改过要清掉 stamp，否则大小没变、部署会以为「已是最新」。
+desc_line() {   # desc.txt 的第一个有效行（跳过空行和 # 注释）
+  unzip -p "$1" desc.txt 2>/dev/null | tr -d '\r' | awk '!/^[ ]*#/ && NF {print; exit}'
+}
 
-  gline=""
-  while IFS= read -r ln; do
-    case "$ln" in
-      ''|'#'*) continue ;;          # 空行和注释跳过
-      'g '*) gline="$ln" ;;         # 小米那套
-      *) return 0 ;;                # 其它情况（多半已经是标准写法）
-    esac
-    break
-  done <<EOF
-$desc
-EOF
-  [ -n "$gline" ] || return 0
-
-  set -- $gline
-  [ -n "$2" ] && [ -n "$3" ] && [ -n "$6" ] || return 1
-  new="$2 $3 $6"
-
-  len=${#gline}
-  pad=$(( len - ${#new} ))
-  [ "$pad" -ge 0 ] || return 1                      # 变长就不敢原地改
-  repl=$(printf "%s%*s" "$new" "$pad" "")
-
-  off=$(grep -abo "$gline" "$nz" 2>/dev/null | head -1 | cut -d: -f1)
-  [ -n "$off" ] || return 1
-  printf '%s' "$repl" | dd of="$nz" bs=1 seek="$off" conv=notrunc 2>/dev/null || return 1
-
-  # 内容变了但字节数没变，stamp 看不出来 → 清掉，逼下次部署重新拷贝
+# 把 desc.txt 里的 old 这一行原地换成 new。返回 0=已改 1=出错 2=new 更长、改不了
+desc_replace() {
+  dr_f="$1"; dr_old="$2"; dr_new="$3"
+  dr_pad=$(( ${#dr_old} - ${#dr_new} ))
+  [ "$dr_pad" -ge 0 ] || return 2
+  dr_repl=$(printf "%s%*s" "$dr_new" "$dr_pad" "")
+  dr_off=$(grep -abo "$dr_old" "$dr_f" 2>/dev/null | head -1 | cut -d: -f1)
+  [ -n "$dr_off" ] || return 1
+  printf '%s' "$dr_repl" | dd of="$dr_f" bs=1 seek="$dr_off" conv=notrunc 2>/dev/null || return 1
   rm -f "$STAMP_FILE" 2>/dev/null
-  log "normalized desc.txt: $gline -> $new ($nz)"
   return 0
 }
 
-# ---------- 适配本机分辨率 ----------
-# 动画 desc.txt 首行的「宽 高」就是 bootanimation 实际渲染的尺寸：比屏幕小 → 四周黑边，
-# 比屏幕大 → 被裁掉一圈。把它改成屏幕物理分辨率（帧率保留）就能满屏。
-# 和 normalize_zip 一样只能「等长原地覆盖」——新串比原串长就改不了（设备上没有重建 zip 的工具）。
+# 本机屏幕物理分辨率（输出「宽 高」；读不到就输出空）
 screen_wh() {
   wm size 2>/dev/null | sed -n 's/.*Physical size: *\([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1 \2/p' | head -1
 }
 
+# 小米系动画的 desc.txt 首行常写成 `g 宽 高 偏移x 偏移y 帧率`，AOSP 的 bootanimation
+# 不认这行，会直接放弃解析 → 开机黑屏。改成标准的 `宽 高 帧率`。
+normalize_zip() {
+  nz="$1"; [ -f "$nz" ] || return 1
+  line=$(desc_line "$nz"); [ -n "$line" ] || return 1
+  case "$line" in
+    'g '*) ;;
+    *) return 0 ;;                                # 不是 g 写法，多半已经是标准写法
+  esac
+  set -- $line
+  [ -n "$2" ] && [ -n "$3" ] && [ -n "$6" ] || return 1
+  new="$2 $3 $6"
+  desc_replace "$nz" "$line" "$new" || return 1
+  log "normalized desc.txt: $line -> $new ($nz)"
+  return 0
+}
+
+# 适配本机分辨率：desc 首行声明的宽高就是 bootanimation 实际渲染的尺寸——比屏幕小 →
+# 四周黑边，比屏幕大 → 被裁掉一圈。改成屏幕物理分辨率（帧率保留）就能满屏。
 fit_zip() {
   fz="$1"; [ -f "$fz" ] || return 1
+  normalize_zip "$fz" >/dev/null 2>&1              # g 写法要先归一化，否则解析不出宽高
+  line=$(desc_line "$fz"); [ -n "$line" ] || return 1
   wh=$(screen_wh); [ -n "$wh" ] || return 1
   tw=${wh%% *}; th=${wh##* }
-  desc=$(unzip -p "$fz" desc.txt 2>/dev/null | tr -d '\r') || return 1
-  [ -n "$desc" ] || return 1
-
-  line=""
-  while IFS= read -r ln; do
-    case "$ln" in ''|'#'*) continue ;; *) line="$ln"; break ;; esac
-  done <<EOF
-$desc
-EOF
-  [ -n "$line" ] || return 1
-
   set -- $line
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac      # 非数字（比如还没归一化的 g 行）交给 normalize
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
   case "$2" in ''|*[!0-9]*) return 1 ;; esac
   case "$3" in ''|*[!0-9]*) fps=30 ;; *) fps=$3 ;; esac
-  [ "$1 $2 $fps" = "$tw $th $fps" ] && return 0   # 已经是本机分辨率
-
   new="$tw $th $fps"
-  len=${#line}
-  pad=$(( len - ${#new} ))
-  [ "$pad" -ge 0 ] || return 1                    # 变长改不了 → 调用方报错
-  repl=$(printf "%s%*s" "$new" "$pad" "")
-
-  off=$(grep -abo "$line" "$fz" 2>/dev/null | head -1 | cut -d: -f1)
-  [ -n "$off" ] || return 1
-  printf '%s' "$repl" | dd of="$fz" bs=1 seek="$off" conv=notrunc 2>/dev/null || return 1
-  rm -f "$STAMP_FILE" 2>/dev/null                 # 等长改动 stamp 看不出来
+  [ "$new" = "$line" ] && return 0                 # 已经是本机分辨率
+  desc_replace "$fz" "$line" "$new" || return 1
   log "fitted desc: $line -> $new ($fz)"
   return 0
 }
@@ -254,9 +228,7 @@ deploy_active() {
   ap=$(active_path)
   if [ -z "$ap" ]; then log "deploy skipped: no active animation"; return 1; fi
   an=$(active_name)
-  # 顺手修正非标准的 desc.txt；改过就会清掉 stamp，下面自然重新拷贝一次
-  normalize_zip "$ap" >/dev/null 2>&1
-  # 顺手把 desc 宽高适配到本机屏幕，避免黑边/裁切（改不了就保持原样）
+  # 顺手改写 desc 首行：归一化 g 写法 + 适配本机分辨率（改过会清掉 stamp，下面自然重拷一次）
   fit_zip "$ap" >/dev/null 2>&1
   new_size=$(file_size "$ap")
   stamp_val="$an:$new_size"
@@ -427,7 +399,9 @@ cmd_import() {
   tmp="$LIB_DIR/.import.$$.tmp"
   if cp -f "$src" "$tmp" 2>/dev/null && mv -f "$tmp" "$target" 2>/dev/null; then
     chmod 0644 "$target" 2>/dev/null
-    normalize_zip "$target" >/dev/null 2>&1     # 非标准 desc.txt 顺手修正（改的是库里的副本）
+    # 顺手改写 desc 首行（归一化 g 写法 + 适配本机分辨率）。改的是库里这份副本，
+    # 这样列表里显示的分辨率就是实际会播的尺寸，跟部署时的结果一致。
+    fit_zip "$target" >/dev/null 2>&1
     rm -f "$inner_tmp" 2>/dev/null             # 解包临时文件用完即删
     log "imported: $target"
     echo "OK stored=${target##*/}"
