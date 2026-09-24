@@ -14,7 +14,7 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 
 ## 安装
 
-管理器里刷 `release/qimu-1.0.0.zip`，重启，再打开模块的「设置」进界面。里面自带一个 LineageOS 的动画和「不播放动画」，装完就能用。
+管理器里刷 `release/qimu-1.0.1.zip`，重启，再打开模块的「设置」进界面。里面自带一个 LineageOS 的动画和「不播放动画」，装完就能用。
 
 安装时会在 `/data/adb/post-fs-data.d/` 和 `/data/adb/service.d/` 各放一个 `qimu-guard.sh`。这两个目录在模块外面，作用只有一个：模块被关掉或删掉之后，把那条主题路径上的动画文件清掉，让开机动画回到出厂。卸载模块时脚本会一起删掉。
 
