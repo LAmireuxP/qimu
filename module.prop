@@ -1,6 +1,6 @@
 id=custom_bootanimation
 name=启幕
-version=1.0.8
-versionCode=108
+version=1.2.0
+versionCode=120
 author=LAmireuxP
 description=HyperOS 开机动画管理器，中文界面。换动画、导入、删除、拖拽排序，也能关掉动画；关闭或卸载后开机会回到出厂动画。支持 KernelSU / SukiSU / APatch / FolkPatch / Magisk。只测过 K60 Pro 和 K30S 至尊纪念版，其他机型自己试。

@@ -223,9 +223,10 @@
     </div>
     <div class="dt" id="vid-prog" style="margin-top:9px;color:var(--sub);font-size:12.5px"></div>
   </div>
-  <div class="hint">选一个视频（在「下载」或「影片」目录），转成动画包并自动导入动画库。<br>
-    画质：原生分辨率满屏、JPG 高质量；帧数上限 600 帧，长视频建议先剪短；<br>
-    视频里的音轨会一并存档（开机动画本身不播声音）。格式需网页能解：MP4/H.264 最稳。</div>
+  <div class="hint">选一个视频（默认列出「下载」和「影片」），转成动画包并自动导入动画库；<br>
+    其他目录点「浏览其他目录」自己翻。画质：原生分辨率满屏、JPG 高质量；<br>
+    帧数上限 600 帧，长视频建议先剪短；视频里的音轨会一并存档（开机动画本身不播声音）。<br>
+    格式需网页能解：MP4/H.264 最稳。</div>
 </div>
 
 <div id="toast"></div>
@@ -799,8 +800,19 @@
   const VID_EXTS = ["mp4", "mov", "mkv", "webm", "m4v", "3gp"];
   const VID_MIME = { mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime",
                      mkv: "video/x-matroska", webm: "video/webm", "3gp": "video/3gpp" };
-  let vidSel = null, vidFps = 30, vidLoop = "auto";
+  let vidSel = null, vidFps = 30, vidLoop = "auto", vidBrowse = null;
   let screenW = 1080, screenH = 2400;
+
+  function vidRow(box, nmText, dtText, onClick, btnText) {
+    const row = document.createElement("div"); row.className = "row";
+    const info = document.createElement("div"); info.className = "info";
+    const nm = document.createElement("div"); nm.className = "nm"; nm.textContent = nmText;
+    const dt = document.createElement("div"); dt.className = "dt"; dt.textContent = dtText;
+    info.appendChild(nm); info.appendChild(dt); row.appendChild(info);
+    const b = document.createElement("button"); b.className = "btn"; b.textContent = btnText || "选择";
+    b.onclick = () => withBusy(onClick);
+    row.appendChild(b); box.appendChild(row);
+  }
 
   function b64ToBytes(b64) {
     const s = atob(b64), u = new Uint8Array(s.length);
@@ -951,6 +963,7 @@
     $("vid-card").style.display = "";
     $("vid-cfg").style.display = "none";
     $("vid-prog").textContent = "";
+    if (vidBrowse) return vidBrowseDir(vidBrowse);      // 上次浏览到哪就回到哪
     const box = $("vid-list"); box.innerHTML = '<div class="empty">扫描视频…</div>';
     const vids = [];
     for (const dir of ["/sdcard/Download", "/sdcard/Movies"]) {
@@ -962,17 +975,31 @@
       });
     }
     box.innerHTML = "";
-    if (!vids.length) { box.innerHTML = '<div class="empty">「下载」和「影片」目录里没有视频（mp4/mov/mkv/webm）</div>'; return; }
-    vids.forEach(v => {
-      const row = document.createElement("div"); row.className = "row";
-      const info = document.createElement("div"); info.className = "info";
-      const nm = document.createElement("div"); nm.className = "nm"; nm.textContent = v.name;
-      const dt = document.createElement("div"); dt.className = "dt"; dt.textContent = bytes(v.size);
-      info.appendChild(nm); info.appendChild(dt); row.appendChild(info);
-      const b = document.createElement("button"); b.className = "btn"; b.textContent = "选择";
-      b.onclick = () => withBusy(() => pickVid(v));
-      row.appendChild(b); box.appendChild(row);
+    vids.forEach(v => vidRow(box, v.name, bytes(v.size), () => pickVid(v)));
+    vidRow(box, "📁 浏览其他目录", "自己翻文件夹找视频", () => { vidBrowse = "/sdcard"; return vidBrowseDir("/sdcard"); }, "浏览");
+  }
+  // 视频的目录浏览（和「选择文件」同级体验）：D 行进目录、V 行可选、⬆ 上一级，/sdcard 为顶
+  async function vidBrowseDir(dir) {
+    vidBrowse = dir;
+    const box = $("vid-list"); box.innerHTML = '<div class="empty">读取目录…</div>';
+    $("vid-cfg").style.display = "none";
+    const out = String(await ctl("ls", dir)).replace(/\r\n/g, "\n");
+    box.innerHTML = "";
+    if (/^\s*ERROR/.test(out)) { box.innerHTML = `<div class="empty">${friendly(out)}</div>`; return; }
+    const ph = document.createElement("div"); ph.className = "path";
+    ph.textContent = dir; ph.style.marginBottom = "8px";
+    box.appendChild(ph);
+    const parent = dir.replace(/\/[^/]+$/, "") || "/sdcard";
+    if (dir !== "/sdcard" && dir !== "/storage") {
+      vidRow(box, "⬆ 上一级", parent, () => vidBrowseDir(parent), "打开");
+    }
+    let any = false;
+    out.split("\n").filter(l => l.trim()).forEach(l => {
+      const p = l.split("\t");
+      if (p[0] === "D") { any = true; vidRow(box, "📁 " + p[1], "文件夹", () => vidBrowseDir(p[2]), "打开"); }
+      else if (p[0] === "V") { any = true; vidRow(box, p[1], bytes(p[2]), () => pickVid({ name: p[1], size: p[2], path: p[3] })); }
     });
+    if (!any) box.appendChild(Object.assign(document.createElement("div"), { className: "empty", textContent: "这个目录里没有视频或子文件夹" }));
   }
   function pickVid(v) {
     vidSel = v;
