@@ -616,12 +616,26 @@
         const del = document.createElement("button");
         del.className = "btn danger";
         del.textContent = "删除";
-        del.onclick = () => withBusy(async () => {
-          // 同上：编号现读，否则排序后会删错文件
-          const r = await ctl("delete", row.dataset.idx);
-          if (/OK /.test(r)) { toast("已删除 " + name, "ok"); await refresh(); }
-          else toast(friendly(r), "err");
-        });
+        // 两段式确认：第一下变「确认删除?」，3 秒内再点才真删——手机上防误触
+        let armed = false, armT = null;
+        del.onclick = () => {
+          if (!armed) {
+            armed = true;
+            del.textContent = "确认删除?";
+            clearTimeout(armT);
+            armT = setTimeout(() => { armed = false; del.textContent = "删除"; }, 3000);
+            return;
+          }
+          clearTimeout(armT);
+          armed = false;
+          del.textContent = "删除";
+          withBusy(async () => {
+            // 编号现读，否则排序后会删错文件
+            const r = await ctl("delete", row.dataset.idx);
+            if (/OK /.test(r)) { toast("已删除 " + name, "ok"); await refresh(); }
+            else toast(friendly(r), "err");
+          });
+        };
         row.appendChild(del);
       }
       box.appendChild(row);
@@ -754,9 +768,9 @@
   }
 
   // fit/swap/setres 的 OK 行自带 to=宽x高 —— 直接拿来更新面板，省一次 desc 往返；
-  // 解析不出再退回 openRes 重新查
+  // 解析不出再退回 openRes 重新查。锚定「 to=」防动画名里碰巧含 to=数字x数字 被误匹配
   function applyResFromOk(r) {
-    const m = /to=(\d+)x(\d+)/.exec(String(r || ""));
+    const m = / to=(\d+)x(\d+)/.exec(String(r || ""));
     if (!m || !resCtx) return false;
     let info = "当前分辨率：" + m[1] + "×" + m[2] + " · " + resFps + "fps";
     if (resScreen) info += "\n本机屏幕：" + resScreen;
@@ -792,12 +806,14 @@
     else toast(friendly(r), "err");
   });
 
-  // 自定义宽高（帧率保留）
+  // 自定义宽高（帧率保留）。范围和 shell 侧 setres 的校验保持一致：
+  // 手动值会跨重启存活（自动适配不再修正），输入必须把严
   $("btn-res-set").onclick = () => withBusy(async () => {
     if (!resCtx) return;
     const w = ($("res-w").value || "").trim();
     const h = ($("res-h").value || "").trim();
     if (!/^\d+$/.test(w) || !/^\d+$/.test(h)) { toast("宽和高都得是数字", "err"); return; }
+    if (+w < 100 || +w > 16384 || +h < 100 || +h > 16384) { toast("宽高得在 100-16384 之间", "err"); return; }
     const r = await ctl("setres", resCtx.idx, w, h);
     if (/OK /.test(r)) {
       if (!applyResFromOk(r)) await openRes(resCtx.idx, resCtx.name);

@@ -65,7 +65,7 @@ adb shell su -c "strings /system/lib64/libbootanimation_preapex.so | grep theme/
 
 ## 其他
 
-动画格式是标准的 AOSP 那套：根目录一个 `desc.txt`，首行是「宽 高 帧率」，后面每行一个段落（`c` 或 `p` 开头），剩下的就是 part0、part1 这些目录里的帧图。整包必须不压缩，bootanimation 只认 STORED，压缩过的会被它直接拒掉。
+动画格式是标准的 AOSP 那套：根目录一个 `desc.txt`，首行是「宽 高 帧率」，后面每行一个段落（`c` 或 `p` 开头），剩下的就是 part0、part1 这些目录里的帧图。整包必须不压缩，bootanimation 只认 STORED，压缩过的会被它直接拒掉。desc.txt 也不能带 UTF-8 BOM（Windows 记事本保存 UTF-8 时会加），带 BOM 会让 bootanimation 解析不了首行直接黑屏，导入时会明确拒绝，用无 BOM 的 UTF-8 重新保存即可。
 
 动画格式不对的会被自动处理：小米系动画的 desc.txt 首行常写成 `g 宽 高 偏移x 偏移y 帧率`，AOSP 的 bootanimation 不认这行（会直接黑屏），本模块在导入和部署时会把它改成标准的 `宽 高 帧率`。
 

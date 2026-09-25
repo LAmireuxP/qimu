@@ -72,6 +72,13 @@ validate_zip() {
   # 根目录必须有 desc.txt（用 -l 列表 + grep，不依赖任何列格式）
   unzip -l "$vf" 2>/dev/null | grep -q 'desc\.txt' || { VALID_MSG="zip 根目录缺少 desc.txt"; return 1; }
 
+  # desc.txt 带 UTF-8 BOM（Windows 记事本常见）会让 bootanimation 解析首行失败 → 黑屏。
+  # BOM 在等长覆盖下去不掉（去掉 3 字节就得重建 zip），只能在这里明确拒绝
+  v_bom=$(unzip -p "$vf" desc.txt 2>/dev/null | dd bs=1 count=3 2>/dev/null | od -An -tx1 2>/dev/null)
+  set -- $v_bom
+  [ "$1" = "ef" ] && [ "$2" = "bb" ] && [ "$3" = "bf" ] \
+    && { VALID_MSG="desc.txt 带 UTF-8 BOM，会导致开机黑屏——请用无 BOM 的 UTF-8 重新保存"; return 1; }
+
   # 兜底全量检查：若该 unzip 的 -v 会打印方法名，出现压缩方法名即拒绝（覆盖混合压缩包）
   if unzip -v "$vf" 2>/dev/null | grep -qE 'Defl|DefN|BZip2|LZMA|Zstd'; then
     VALID_MSG="动画必须是 ZIP_STORED 无压缩格式"
@@ -537,6 +544,10 @@ cmd_setres() {
   case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: setres N 宽 高"; return 1;; esac
   case "$w" in ''|*[!0-9]*) echo "ERROR 宽必须是数字"; return 1;; esac
   case "$h" in ''|*[!0-9]*) echo "ERROR 高必须是数字"; return 1;; esac
+  # 手动设定的值会进 manual.txt、部署时不再自动修正——坏值会跨重启存活，入口必须把严
+  [ "${#w}" -le 5 ] && [ "${#h}" -le 5 ] || { echo "ERROR 宽高位数太长"; return 1; }
+  [ "$w" -ge 100 ] && [ "$w" -le 16384 ] && [ "$h" -ge 100 ] && [ "$h" -le 16384 ] \
+    || { echo "ERROR 宽高超出合理范围（100-16384）"; return 1; }
   p=$(entry_at "$idx")
   [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
   line=$(desc_line "$p")
