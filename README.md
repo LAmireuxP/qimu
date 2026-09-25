@@ -1,6 +1,6 @@
 # 启幕
 
-HyperOS 的开机动画管理器，KernelSU / SukiSU / APatch / Magisk 都能用。中文界面，换动画、导入动画、删动画、调分辨率，或者干脆不显示动画。
+HyperOS 的开机动画管理器，KernelSU / SukiSU / APatch / Magisk 都能用。中文界面，换动画、导入动画、删动画、把视频转成开机动画、调分辨率，或者干脆不显示动画。
 
 HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` 这一条，比 `/system/media`、`/product/media` 都靠前，所以这个模块直接往这条路径写，不用动系统分区。关掉模块或者卸载之后，下次开机会自动回到出厂的动画。
 
@@ -10,12 +10,13 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 - 导入自己的：zip 丢进「下载」目录点「扫描目录」，或者点「选择文件」自己翻到动画放的位置
 - 调顺序：按住每行左边的 ⠿ 上下拖，或者用 ▲▼ 一格一格移，松手就存
 - 不要动画：选「不播放动画」，开机黑屏直接进系统
+- 视频转动画：手机里的视频（MP4/MOV/MKV/WEBM）直接转成开机动画并导入，全程手机本地完成，不用电脑
 - 分辨率自动适配：刷入时自动改到你屏幕的尺寸，不会黑边也不会被裁掉；方向画反也能自动纠正，界面里还能手动调
 - 界面跟随系统深浅色，也可以手动固定成浅色或深色
 
 ## 安装
 
-管理器里刷 [Releases](https://github.com/LAmireuxP/qimu/releases) 里最新的 `qimu-1.0.5.zip`，重启，再打开模块的「设置」进界面。里面自带一个 LineageOS 的动画和「不播放动画」，装完就能用。
+管理器里刷 [Releases](https://github.com/LAmireuxP/qimu/releases) 里最新的 zip，重启，再打开模块的「设置」进界面。里面自带一个 LineageOS 的动画和「不播放动画」，装完就能用。升级直接刷新包，你之前选的动画和排序都会保留。
 
 安装时会在 `/data/adb/post-fs-data.d/` 和 `/data/adb/service.d/` 各放一个 `qimu-guard.sh`。这两个目录在模块外面，作用只有一个：模块被关掉或删掉之后，把那条主题路径上的动画文件清掉，让开机动画回到出厂。卸载模块时脚本会一起删掉。
 
@@ -23,11 +24,12 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 
 1. 进界面，点某个动画的「应用」，重启
 2. 加自己的动画：zip 得是 **ZIP_STORED 不压缩**、根目录有 `desc.txt`，放进「下载」目录后点「扫描目录」，或者点「选择文件」自己翻到它所在的位置导入。格式不对界面会告诉你原因
-3. 正在用哪个动画，界面里有「使用中」标记
+3. 想用视频当开机动画：点「视频转换」，选手机里的视频（下载/影片目录，或自己翻目录）一键转换导入，不用电脑
+4. 正在用哪个动画，界面里有「使用中」标记
 
 `tools/pad_convert.py` 可以把随便一个 AOSP 格式的动画转成能用的：帧按 cover 方式缩放裁切到目标分辨率（满屏无黑边、无损 PNG）、desc 首行改成目标分辨率、强制不压缩。用之前 `pip install pillow`，目标尺寸跟在名字后面传，如 `python tools/pad_convert.py 源.zip 目标.zip 名字 1080x2400`。
 
-`tools/mp4_convert.py` 更进一步，直接把 MP4 等视频转成开机动画包：按帧率抽帧、cover 缩放裁切到目标分辨率、整段循环或播一遍可选，视频里的音轨还会提取成 `sound/poweron.mp3` 一起放进包里（导入时启幕会自动解出来留档）。用之前 `pip install imageio-ffmpeg pillow`（自带静态 ffmpeg，不用手动装），如 `python tools/mp4_convert.py 视频.mp4 动画包.zip`。转换在电脑上做——手机端没有任何视频解码工具，导入转换好的 zip 走正常的「扫描目录 / 选择文件」流程就行。
+`tools/mp4_convert.py` 是视频转动画的电脑端版本，和模块里内置的「视频转换」效果一样，适合想批量转、或要精确控制帧率和分辨率的时候用：`pip install imageio-ffmpeg pillow` 之后 `python tools/mp4_convert.py 视频.mp4 动画包.zip`，视频里的音轨也会提取进包里。日常用模块界面里的「视频转换」就够了，这两个工具是备着批量处理和精细控制用的。
 
 ## 导入哪种包
 
