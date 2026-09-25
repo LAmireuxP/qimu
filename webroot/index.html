@@ -761,7 +761,6 @@
 
     rows.forEach(line => {
       const p = line.split("\t");
-      if (p[0] === "V") return;                        // 视频在「视频转换」里处理，这里不显示
       const row = document.createElement("div");
       row.className = "row";
       const info = document.createElement("div");
@@ -773,6 +772,15 @@
         dt.textContent = "文件夹";
         row.appendChild(info); info.appendChild(nm); info.appendChild(dt);
         row.onclick = () => withBusy(() => browse(p[2]));
+      } else if (p[0] === "V") {
+        // 视频：选择文件里不导入，给一个直达「视频转换」的入口
+        nm.textContent = p[1];
+        dt.textContent = bytes(p[2]) + " · 视频可转开机动画";
+        row.appendChild(info); info.appendChild(nm); info.appendChild(dt);
+        const vb = document.createElement("button");
+        vb.className = "btn"; vb.textContent = "转换";
+        vb.onclick = () => withBusy(() => jumpToVid({ name: p[1], size: p[2], path: p[3] }));
+        row.appendChild(vb);
       } else {
         nm.textContent = p[1];
         dt.textContent = bytes(p[2]);
@@ -792,6 +800,20 @@
       }
       box.appendChild(row);
     });
+  }
+
+  // 从「选择文件」跳到「视频转换」并选中该视频（openVid 会重建列表，cfg 要在它之后显示）
+  async function jumpToVid(v) {
+    vidSel = v;
+    $("browse-card").style.display = "none";
+    $("btn-browse").textContent = "选择文件";
+    $("vid-card").style.display = "";
+    await openVid();
+    vidSel = v;
+    $("vid-cfg").style.display = "";
+    $("vid-sel").textContent = v.name + " · " + bytes(v.size);
+    $("vid-prog").textContent = "";
+    try { $("vid-card").scrollIntoView({ block: "start" }); } catch (_) {}
   }
 
   /* ------------------ 视频转动画 ------------------ */
@@ -849,18 +871,28 @@
     return catBytes([...local, cd, eocd]);
   }
 
-  // 桥的单条命令有长度上限，也为了控制内存：文件按块 dd|base64 读回
+  // 桥的单条命令有长度上限，也为了控制内存：文件按块 dd|base64 读回。
+  // 注意 dd 的 skip 是按块算的：整块用固定 bs 按块跳，最后一个不完整块改用 tail -c 按字节取——
+  // 之前最后一块改了 bs 却没换算 skip，读成文件中段的数据，视频尾部的 moov 一坏就「解不动」
   async function readDeviceBytes(path, onProg) {
     const sz = parseInt((await run(`wc -c < ${quote(path)}`)).trim(), 10) || 0;
     if (!sz) throw new Error("读不到视频内容");
     const CH = 65536, parts = [];
-    for (let off = 0; off < sz; off += CH) {
-      const cnt = Math.min(CH, sz - off);
-      const out = await run(`dd if=${quote(path)} bs=${cnt} skip=${Math.floor(off / CH)} count=1 2>/dev/null | base64`);
+    const full = Math.floor(sz / CH);
+    for (let k = 0; k < full; k++) {
+      const out = await run(`dd if=${quote(path)} bs=${CH} skip=${k} count=1 2>/dev/null | base64`);
       parts.push(b64ToBytes(String(out).replace(/\s+/g, "")));
-      onProg && onProg(Math.min(off + CH, sz), sz, "读取视频");
+      onProg && onProg(Math.min((k + 1) * CH, sz), sz, "读取视频");
     }
-    return catBytes(parts);
+    const rem = sz - full * CH;
+    if (rem > 0) {
+      const out = await run(`tail -c +${full * CH + 1} ${quote(path)} 2>/dev/null | head -c ${rem} | base64`);
+      parts.push(b64ToBytes(String(out).replace(/\s+/g, "")));
+      onProg && onProg(sz, sz, "读取视频");
+    }
+    const data = catBytes(parts);
+    if (data.length !== sz) throw new Error("视频读取不完整，请重试");
+    return data;
   }
   async function writeDeviceBytes(path, bytes, onProg) {
     await run(`rm -f ${quote(path)}`);

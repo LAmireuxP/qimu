@@ -19,3 +19,4 @@ audio_test.zip
 
 # 内部打包脚本，不公开
 tools/release.sh
+vid_probe.mp4
