@@ -11,3 +11,8 @@ __pycache__/
 
 # 出包产物走 GitHub Release，不进版本库（每发一版 .git 涨 ~8MB）
 release/
+
+# 测试残留
+qtest/
+audio_test.zip
+*-src.zip
