@@ -16,3 +16,6 @@ release/
 qtest/
 audio_test.zip
 *-src.zip
+
+# 内部打包脚本，不公开
+tools/release.sh
