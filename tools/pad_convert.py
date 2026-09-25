@@ -24,10 +24,12 @@ def parse_desc(raw):
     return fps, parts
 
 
-def pad_frame(data, target_w=W, canvas=(W, H)):
-    """cover 缩放 + 居中裁切到 canvas：满屏无黑边，像素最大化"""
+def pad_frame(data, canvas=None):
+    """cover 缩放 + 居中裁切到 canvas：满屏无黑边，像素最大化。
+    canvas 在调用时读取（缺省用全局 W/H），别用默认参数绑定——import 本模块时
+    sys.argv 不是命令行，绑定的会是缺省 1440x3120"""
+    cw, ch = canvas if canvas else (W, H)
     im = Image.open(io.BytesIO(data)).convert('RGB')
-    cw, ch = canvas
     scale = max(cw / im.width, ch / im.height)
     nw, nh = max(cw, round(im.width * scale)), max(ch, round(im.height * scale))
     if (nw, nh) != (im.width, im.height):
@@ -58,7 +60,7 @@ def convert(src, dst, name=''):
                 zout.writestr(zi, b'')
             for n in frames:
                 zi = zipfile.ZipInfo(n); zi.compress_type = zipfile.ZIP_STORED
-                zout.writestr(zi, encode_png(pad_frame(zin.read(n))))
+                zout.writestr(zi, encode_png(pad_frame(zin.read(n), (W, H))))
     print(f'{name or src}: {len(frames)} frames -> {os.path.getsize(dst)} bytes; desc={newdesc.strip()[:50]!r}')
 
 
