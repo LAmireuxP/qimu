@@ -31,9 +31,17 @@ mkdir -p "$LIB_DIR" "$STATE_DIR" "$LOG_DIR" 2>/dev/null
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >>"$LOG_DIR/ctl.log" 2>/dev/null; }
 
 # ---------- 工具（参数展开，不派生子进程） ----------
+# 设备上 fork+exec 很贵（一次 5-15ms），info/部署这类每次操作要跑几十条命令的路径
+# 能用参数展开解决的都不开子进程；只有 unzip/wm/grep/dd 这种必须调外部命令的才 fork
+CR=$(printf '\r'); TAB=$(printf '\t')
+
 # 取不带 .zip 的动画名
 name_of() { n=${1##*/}; printf '%s\n' "${n%.zip}"; }
-file_size() { wc -c <"$1" 2>/dev/null | tr -d ' '; }
+file_size() {
+  fs_s=$(wc -c <"$1" 2>/dev/null) || { echo ""; return 0; }
+  set -- $fs_s                                   # 按空白拆分，替代 tr -d ' '
+  echo "${1:-}"
+}
 
 # 清理会被列表格式/模式匹配弄坏的名字（仅导入时调用）
 sanitize_name() {
@@ -74,8 +82,42 @@ validate_zip() {
 # 设备上没有能重建 zip 的工具（toybox/busybox 都没有 zip 子命令），新内容不能比原行长。
 # 副作用：CRC 与实际内容对不上，但 bootanim 读 STORED 条目是直接 memcpy、不校验 CRC，
 # 照常播放（真机验证过）。原地改过要清掉 stamp，否则大小没变、部署会以为「已是最新」。
-desc_line() {   # desc.txt 的第一个有效行（跳过空行和 # 注释）
-  unzip -p "$1" desc.txt 2>/dev/null | tr -d '\r' | awk '!/^[ ]*#/ && NF {print; exit}'
+# desc.txt 的第一个有效行（跳过空行和 # 注释）。只 fork 一次 unzip，行筛选用纯 shell：
+# 返回的行保持原样（仅去 \r），因为 desc_replace 要拿它在 zip 里做逐字节定位
+desc_line() {
+  unzip -p "$1" desc.txt 2>/dev/null | while :; do
+    l=""
+    IFS= read -r l || [ -n "$l" ] || break      # 最后一行没有换行符也不能丢
+    dl_t=${l%"$CR"}
+    dl_c=$dl_t
+    while :; do                                 # 判断用的副本去行首空白；返回的行不动
+      case "$dl_c" in
+        ' '*) dl_c=${dl_c#' '} ;;
+        "$TAB"*) dl_c=${dl_c#"$TAB"} ;;
+        *) break ;;
+      esac
+    done
+    case "$dl_c" in ''|'#'*) continue ;; esac
+    printf '%s\n' "$dl_t"
+    break
+  done
+}
+
+# 解析 desc 首行，兼容两种写法：
+#   标准：  宽 高 帧率
+#   小米：  g 宽 高 偏移x 偏移y 帧率
+# 成功设 D_W / D_H / D_FPS（帧率缺省按 30），g 写法另设 D_G=1；解析不了 return 1
+parse_desc_line() {
+  D_W=""; D_H=""; D_FPS=""; D_G=""
+  set -- $1
+  case "$1" in
+    g) D_G=1; D_W=$2; D_H=$3; D_FPS=$6 ;;
+    *) D_W=$1; D_H=$2; D_FPS=$3 ;;
+  esac
+  case "$D_W" in ''|*[!0-9]*) return 1 ;; esac
+  case "$D_H" in ''|*[!0-9]*) return 1 ;; esac
+  case "$D_FPS" in ''|*[!0-9]*) D_FPS=30 ;; esac
+  return 0
 }
 
 # 把 desc.txt 里的 old 这一行原地换成 new。返回 0=已改 1=出错 2=new 更长、改不了
@@ -84,16 +126,33 @@ desc_replace() {
   dr_pad=$(( ${#dr_old} - ${#dr_new} ))
   [ "$dr_pad" -ge 0 ] || return 2
   dr_repl=$(printf "%s%*s" "$dr_new" "$dr_pad" "")
-  dr_off=$(grep -abo "$dr_old" "$dr_f" 2>/dev/null | head -1 | cut -d: -f1)
+  dr_g=$(grep -abo "$dr_old" "$dr_f" 2>/dev/null) || return 1
+  dr_off=${dr_g%%:*}                             # 多处匹配时取第一处；desc 行里不会有冒号
   [ -n "$dr_off" ] || return 1
   printf '%s' "$dr_repl" | dd of="$dr_f" bs=1 seek="$dr_off" conv=notrunc 2>/dev/null || return 1
   rm -f "$STAMP_FILE" 2>/dev/null
   return 0
 }
 
-# 本机屏幕物理分辨率（输出「宽 高」；读不到就输出空）
+# 本机屏幕物理分辨率（输出「宽 高」；读不到就输出空）。只 fork 一次 wm，行解析用纯 shell
 screen_wh() {
-  wm size 2>/dev/null | sed -n 's/.*Physical size: *\([0-9][0-9]*\)x\([0-9][0-9]*\).*/\1 \2/p' | head -1
+  scr_raw=$(wm size 2>/dev/null) || return 0
+  scr_line=""
+  while IFS= read -r scr_l; do                   # 取 Physical size 行（Override 行不要）
+    case "$scr_l" in
+      *Physical*size*) scr_line=$scr_l; break ;;
+    esac
+  done <<SCR_IN
+$scr_raw
+SCR_IN
+  [ -n "$scr_line" ] || return 0
+  scr_line=${scr_line%"$CR"}
+  scr_line=${scr_line#*:}                        # 去掉 "Physical size" 前缀
+  while :; do
+    case "$scr_line" in ' '*) scr_line=${scr_line#' '} ;; *) break ;; esac
+  done
+  set -- ${scr_line%x*} ${scr_line#*x}
+  echo "$1 $2"
 }
 
 # 小米系动画的 desc.txt 首行常写成 `g 宽 高 偏移x 偏移y 帧率`，AOSP 的 bootanimation
@@ -101,13 +160,9 @@ screen_wh() {
 normalize_zip() {
   nz="$1"; [ -f "$nz" ] || return 1
   line=$(desc_line "$nz"); [ -n "$line" ] || return 1
-  case "$line" in
-    'g '*) ;;
-    *) return 0 ;;                                # 不是 g 写法，多半已经是标准写法
-  esac
-  set -- $line
-  [ -n "$2" ] && [ -n "$3" ] && [ -n "$6" ] || return 1
-  new="$2 $3 $6"
+  parse_desc_line "$line" || return 1
+  [ -n "$D_G" ] || return 0                       # 不是 g 写法，多半已经是标准写法
+  new="$D_W $D_H $D_FPS"
   desc_replace "$nz" "$line" "$new" || return 1
   log "normalized desc.txt: $line -> $new ($nz)"
   return 0
@@ -122,25 +177,25 @@ normalize_zip() {
 # 屏幕宽高对调再写，保证写进去的方向和源动画一致。
 fit_zip() {
   fz="$1"; [ -f "$fz" ] || return 1
-  normalize_zip "$fz" >/dev/null 2>&1              # g 写法要先归一化，否则解析不出宽高
   line=$(desc_line "$fz"); [ -n "$line" ] || return 1
-  set -- $line
-  sw=$1; sh=$2
-  case "$sw" in ''|*[!0-9]*) return 1 ;; esac
-  case "$sh" in ''|*[!0-9]*) return 1 ;; esac
-  case "$3" in ''|*[!0-9]*) fps=30 ;; *) fps=$3 ;; esac
-  wh=$(screen_wh); [ -n "$wh" ] || return 1
+  parse_desc_line "$line" || return 1              # g 写法这里也能解析，写入时顺带归一化
+  wh=$(screen_wh)
+  if [ -z "$wh" ]; then
+    # 读不到屏幕就没法适配；但 g 写法必须归一化掉，否则开机会黑屏
+    normalize_zip "$fz" >/dev/null 2>&1
+    return 1
+  fi
   cw=${wh%% *}; ch=${wh##* }
   # 方向相反 → 对调屏幕宽高，避免长宽互换
-  if [ "$sw" -lt "$sh" ] && [ "$cw" -gt "$ch" ]; then
+  if [ "$D_W" -lt "$D_H" ] && [ "$cw" -gt "$ch" ]; then
     tw=$ch; th=$cw
-  elif [ "$sw" -gt "$sh" ] && [ "$cw" -lt "$ch" ]; then
+  elif [ "$D_W" -gt "$D_H" ] && [ "$cw" -lt "$ch" ]; then
     tw=$ch; th=$cw
   else
     tw=$cw; th=$ch
   fi
   FIT_TW=$tw; FIT_TH=$th
-  new="$tw $th $fps"
+  new="$tw $th $D_FPS"
   [ "$new" = "$line" ] && return 0                 # 已经是本机分辨率
   desc_replace "$fz" "$line" "$new" || return 1
   log "fitted desc: $line -> $new ($fz)"
@@ -192,14 +247,23 @@ entry_at() {
   done
 }
 
-active_name() { [ -s "$SELECTED_FILE" ] && cat "$SELECTED_FILE" 2>/dev/null | tr -d '\r\n'; }
+active_name() {
+  [ -s "$SELECTED_FILE" ] || return 0
+  an_l=""
+  IFS= read -r an_l <"$SELECTED_FILE" 2>/dev/null  # 纯 shell 读首行，不开 cat/tr
+  printf '%s' "${an_l%"$CR"}"
+}
 active_path() {
   an=$(active_name)
   [ -n "$an" ] && [ -f "$LIB_DIR/$an.zip" ] && echo "$LIB_DIR/$an.zip"
 }
 
+# 列表里每行显示的「宽×高 · 帧率fps」（读不出就空）。复用 desc_line+parse，每行只 fork 一次 unzip
 desc_info() {
-  unzip -p "$1" desc.txt 2>/dev/null | tr -d '\r' | awk '/^[0-9]+[ \t]+[0-9]+/ {print $1"×"$2" · "$3"fps"; exit} /^g[ \t]+[0-9]+/ {print $2"×"$3" · "$6"fps"; exit}'
+  di_line=$(desc_line "$1")
+  [ -n "$di_line" ] || return 0
+  parse_desc_line "$di_line" || return 0
+  printf '%s\n' "$D_W×$D_H · ${D_FPS}fps"
 }
 
 # ---------- 守卫脚本（关键：让「关闭模块」也能恢复出厂动画） ----------
@@ -367,6 +431,21 @@ cmd_select() {
   fi
 }
 
+# desc 改写成功后的统一收尾：动画正在使用就重新部署；输出统一的 OK 行
+# （界面靠 OK 行里的 to=宽x高 直接更新面板，格式别乱动）
+finish_desc_change() {   # $1=命令名(fitted/setres/swap) $2=动画名 $3=目标宽高(宽x高)
+  if [ "$2" = "$(active_name)" ]; then
+    if deploy_active >/dev/null 2>&1; then
+      echo "OK $1=$2 to=$3 (redeployed)"
+    else
+      echo "OK $1=$2 to=$3 (但重新部署失败)"
+    fi
+  else
+    echo "OK $1=$2 to=$3"
+  fi
+  return 0
+}
+
 # 手动把某个动画的 desc 适配到本机分辨率（部署时也会自动做，这里给排障/单独调用用）
 cmd_fit() {
   idx="$1"
@@ -377,42 +456,25 @@ cmd_fit() {
   [ -n "$wh" ] || { echo "ERROR 读不到本机分辨率"; return 1; }
   n=$(name_of "$p")
   if fit_zip "$p"; then
-    to="${FIT_TW}x${FIT_TH}"                       # 方向感知后实际写入的宽高
-    if [ "$n" = "$(active_name)" ]; then
-      if deploy_active >/dev/null 2>&1; then
-        echo "OK fitted=$n to=$to (redeployed)"
-      else
-        echo "OK fitted=$n to=$to (但重新部署失败)"
-      fi
-    else
-      echo "OK fitted=$n to=$to"
-    fi
+    finish_desc_change fitted "$n" "${FIT_TW}x${FIT_TH}"   # 方向感知后实际写入的宽高
   else
     echo "ERROR 适配失败：新分辨率串比原来的长，或 desc 不是标准格式"
     return 1
   fi
 }
 
-# 只读：打印某动画当前的 desc 分辨率（兼容标准「宽 高 帧率」和小米「g 宽 高 偏移x 偏移y 帧率」）
-# 给界面里「分辨率」面板用，不写文件。
+# 只读：打印某动画当前的 desc 分辨率，给界面里「分辨率」面板用，不写文件
 cmd_desc() {
   idx="$1"
   case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: desc N"; return 1;; esac
   p=$(entry_at "$idx")
   [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
-  line=$(unzip -p "$p" desc.txt 2>/dev/null | tr -d '\r' | awk '!/^[ ]*#/ && NF {print; exit}')
+  line=$(desc_line "$p")
   [ -n "$line" ] || { echo "ERROR 读不到 desc.txt"; return 1; }
-  set -- $line
-  case "$1" in
-    g) w=$2; h=$3; fps=$6 ;;                       # 小米 g 写法
-    *) w=$1; h=$2; fps=$3 ;;                       # 标准写法
-  esac
-  case "$w" in ''|*[!0-9]*) echo "ERROR desc 不是标准格式"; return 1;; esac
-  case "$h" in ''|*[!0-9]*) echo "ERROR desc 不是标准格式"; return 1;; esac
-  case "$fps" in ''|*[!0-9]*) fps=30 ;; esac
-  echo "desc_w=$w"
-  echo "desc_h=$h"
-  echo "desc_fps=$fps"
+  parse_desc_line "$line" || { echo "ERROR desc 不是标准格式"; return 1; }
+  echo "desc_w=$D_W"
+  echo "desc_h=$D_H"
+  echo "desc_fps=$D_FPS"
   wh=$(screen_wh)
   if [ -n "$wh" ]; then echo "screen=${wh%% *}x${wh##* }"; else echo "screen=未知"; fi
   echo "desc_line=$line"
@@ -420,6 +482,7 @@ cmd_desc() {
 }
 
 # 手动设置某动画的 desc 分辨率（帧率保留）。设备上不能重建 zip，新串不能比原行长。
+# 直接解析原始行（g 写法也行），写入标准格式时顺带归一化，不用先单独 normalize
 cmd_setres() {
   idx="$1"; w="$2"; h="$3"
   case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: setres N 宽 高"; return 1;; esac
@@ -427,13 +490,11 @@ cmd_setres() {
   case "$h" in ''|*[!0-9]*) echo "ERROR 高必须是数字"; return 1;; esac
   p=$(entry_at "$idx")
   [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
-  normalize_zip "$p" >/dev/null 2>&1               # 先归一化，保证读到标准行、$3 是帧率
   line=$(desc_line "$p")
   [ -n "$line" ] || { echo "ERROR 读不到 desc.txt"; return 1; }
-  set -- $line
-  case "$3" in ''|*[!0-9]*) fps=30 ;; *) fps=$3 ;; esac
+  parse_desc_line "$line" || { echo "ERROR desc 不是标准格式"; return 1; }
   n=$(name_of "$p")
-  new="$w $h $fps"
+  new="$w $h $D_FPS"
   desc_replace "$p" "$line" "$new"; rc=$?
   case "$rc" in
     0) ;;
@@ -441,13 +502,7 @@ cmd_setres() {
     *) echo "ERROR 写入 desc 失败"; return 1;;
   esac
   log "setres: $line -> $new ($p)"
-  if [ "$n" = "$(active_name)" ]; then
-    if deploy_active >/dev/null 2>&1; then echo "OK setres=$n to=${w}x${h} (redeployed)"
-    else echo "OK setres=$n to=${w}x${h} (但重新部署失败)"; fi
-  else
-    echo "OK setres=$n to=${w}x${h}"
-  fi
-  return 0
+  finish_desc_change setres "$n" "${w}x${h}"
 }
 
 # 交换某动画 desc 的宽高（一键修正长宽互换）。宽高位数相同，串长不变，必能写入。
@@ -456,16 +511,11 @@ cmd_swap() {
   case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: swap N"; return 1;; esac
   p=$(entry_at "$idx")
   [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
-  normalize_zip "$p" >/dev/null 2>&1
   line=$(desc_line "$p")
   [ -n "$line" ] || { echo "ERROR 读不到 desc.txt"; return 1; }
-  set -- $line
-  ow=$1; oh=$2
-  case "$ow" in ''|*[!0-9]*) echo "ERROR desc 不是标准格式"; return 1;; esac
-  case "$oh" in ''|*[!0-9]*) echo "ERROR desc 不是标准格式"; return 1;; esac
-  case "$3" in ''|*[!0-9]*) fps=30 ;; *) fps=$3 ;; esac
+  parse_desc_line "$line" || { echo "ERROR desc 不是标准格式"; return 1; }
   n=$(name_of "$p")
-  new="$oh $ow $fps"                               # 宽高对调
+  new="$D_H $D_W $D_FPS"                           # 宽高对调
   desc_replace "$p" "$line" "$new"; rc=$?
   case "$rc" in
     0) ;;
@@ -473,13 +523,7 @@ cmd_swap() {
     *) echo "ERROR 写入 desc 失败"; return 1;;
   esac
   log "swap: $line -> $new ($p)"
-  if [ "$n" = "$(active_name)" ]; then
-    if deploy_active >/dev/null 2>&1; then echo "OK swap=$n to=${oh}x${ow} (redeployed)"
-    else echo "OK swap=$n to=${oh}x${ow} (但重新部署失败)"; fi
-  else
-    echo "OK swap=$n to=${oh}x${ow}"
-  fi
-  return 0
+  finish_desc_change swap "$n" "${D_H}x${D_W}"
 }
 
 cmd_import() {

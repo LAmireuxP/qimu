@@ -729,7 +729,7 @@
 
   /* ------------------ 分辨率调整 ------------------ */
   // 面板上下文：当前在调哪个动画（编号会随排序变，每次开面板时记下当时的编号）
-  let resCtx = null;
+  let resCtx = null, resFps = 30, resScreen = "";
 
   async function openRes(idx, name) {
     resCtx = { idx: String(idx), name };
@@ -741,14 +741,27 @@
     if (/^\s*ERROR/.test(out)) { $("res-info").textContent = friendly(out); return; }
     const p = {};
     out.split("\n").forEach(l => { const i = l.indexOf("="); if (i > 0) p[l.slice(0, i)] = l.slice(i + 1); });
-    const cur = (p.desc_w && p.desc_h)
-      ? p.desc_w + "×" + p.desc_h + " · " + (p.desc_fps || 30) + "fps"
-      : "未知";
+    resFps = parseInt(p.desc_fps, 10) || 30;
+    resScreen = p.screen && p.screen !== "未知" ? p.screen : "";
+    const cur = (p.desc_w && p.desc_h) ? p.desc_w + "×" + p.desc_h + " · " + resFps + "fps" : "未知";
     let info = "当前分辨率：" + cur;
-    if (p.screen && p.screen !== "未知") info += "\n本机屏幕：" + p.screen;
+    if (resScreen) info += "\n本机屏幕：" + resScreen;
     $("res-info").textContent = info;
     $("res-w").value = p.desc_w || "";
     $("res-h").value = p.desc_h || "";
+  }
+
+  // fit/swap/setres 的 OK 行自带 to=宽x高 —— 直接拿来更新面板，省一次 desc 往返；
+  // 解析不出再退回 openRes 重新查
+  function applyResFromOk(r) {
+    const m = /to=(\d+)x(\d+)/.exec(String(r || ""));
+    if (!m || !resCtx) return false;
+    let info = "当前分辨率：" + m[1] + "×" + m[2] + " · " + resFps + "fps";
+    if (resScreen) info += "\n本机屏幕：" + resScreen;
+    $("res-info").textContent = info;
+    $("res-w").value = m[1];
+    $("res-h").value = m[2];
+    return true;
   }
 
   function closeRes() { $("res-card").style.display = "none"; resCtx = null; }
@@ -759,7 +772,10 @@
   $("btn-res-fit").onclick = () => withBusy(async () => {
     if (!resCtx) return;
     const r = await ctl("fit", resCtx.idx);
-    if (/OK /.test(r)) { toast("已适配到本机屏幕", "ok"); await openRes(resCtx.idx, resCtx.name); await refresh(); }
+    if (/OK /.test(r)) {
+      if (!applyResFromOk(r)) await openRes(resCtx.idx, resCtx.name);
+      toast("已适配到本机屏幕", "ok"); await refresh();
+    }
     else toast(friendly(r), "err");
   });
 
@@ -767,7 +783,10 @@
   $("btn-res-swap").onclick = () => withBusy(async () => {
     if (!resCtx) return;
     const r = await ctl("swap", resCtx.idx);
-    if (/OK /.test(r)) { toast("已交换宽高", "ok"); await openRes(resCtx.idx, resCtx.name); await refresh(); }
+    if (/OK /.test(r)) {
+      if (!applyResFromOk(r)) await openRes(resCtx.idx, resCtx.name);
+      toast("已交换宽高", "ok"); await refresh();
+    }
     else toast(friendly(r), "err");
   });
 
@@ -778,7 +797,10 @@
     const h = ($("res-h").value || "").trim();
     if (!/^\d+$/.test(w) || !/^\d+$/.test(h)) { toast("宽和高都得是数字", "err"); return; }
     const r = await ctl("setres", resCtx.idx, w, h);
-    if (/OK /.test(r)) { toast("已设为 " + w + "×" + h, "ok"); await openRes(resCtx.idx, resCtx.name); await refresh(); }
+    if (/OK /.test(r)) {
+      if (!applyResFromOk(r)) await openRes(resCtx.idx, resCtx.name);
+      toast("已设为 " + w + "×" + h, "ok"); await refresh();
+    }
     else toast(friendly(r), "err");
   });
 
