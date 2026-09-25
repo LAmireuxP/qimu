@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # 开机动画管理器 - 控制脚本
-# 用法: ctl.sh {list|status|info|select N|fit N|import PATH|delete N|scan|reset|order NAME...|guard|unguard|deploy}
+# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|import PATH|delete N|scan|ls DIR|reset|order NAME...|guard|unguard|deploy}
 #
 # 几处踩过坑的地方，改的时候注意：
 #   - 动画库列表每次运行只枚举一次，order.txt 一次读进来用纯 shell 比较，
@@ -22,6 +22,9 @@ STAMP_FILE="$STATE_DIR/deployed.stamp"
 SCAN_DIRS="/sdcard/Download /storage/emulated/0/Download /sdcard/CustomBoot /sdcard /data/local/tmp"
 NO_ANIM_NAME="不播放动画"
 ORDER_FILE="$STATE_DIR/order.txt"
+
+# fit_zip 算好后把「目标宽 高」放这里，供 cmd_fit 汇报用
+FIT_TW=""; FIT_TH=""
 
 mkdir -p "$LIB_DIR" "$STATE_DIR" "$LOG_DIR" 2>/dev/null
 
@@ -112,16 +115,31 @@ normalize_zip() {
 
 # 适配本机分辨率：desc 首行声明的宽高就是 bootanimation 实际渲染的尺寸——比屏幕小 →
 # 四周黑边，比屏幕大 → 被裁掉一圈。改成屏幕物理分辨率（帧率保留）就能满屏。
+#
+# 关键：保留源动画的方向。wm size 在某些机型/ROM 上会按当前旋转或「长边优先」返回，
+# 屏幕读到的宽高方向未必和物理竖屏一致。若源动画是竖屏(sw<sh)而屏幕读到横屏(cw>ch)，
+# 直接写 cw×ch 就会把竖屏动画塞进横屏尺寸 → 出现「长宽互换」。所以方向相反时先把
+# 屏幕宽高对调再写，保证写进去的方向和源动画一致。
 fit_zip() {
   fz="$1"; [ -f "$fz" ] || return 1
   normalize_zip "$fz" >/dev/null 2>&1              # g 写法要先归一化，否则解析不出宽高
   line=$(desc_line "$fz"); [ -n "$line" ] || return 1
-  wh=$(screen_wh); [ -n "$wh" ] || return 1
-  tw=${wh%% *}; th=${wh##* }
   set -- $line
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  case "$2" in ''|*[!0-9]*) return 1 ;; esac
+  sw=$1; sh=$2
+  case "$sw" in ''|*[!0-9]*) return 1 ;; esac
+  case "$sh" in ''|*[!0-9]*) return 1 ;; esac
   case "$3" in ''|*[!0-9]*) fps=30 ;; *) fps=$3 ;; esac
+  wh=$(screen_wh); [ -n "$wh" ] || return 1
+  cw=${wh%% *}; ch=${wh##* }
+  # 方向相反 → 对调屏幕宽高，避免长宽互换
+  if [ "$sw" -lt "$sh" ] && [ "$cw" -gt "$ch" ]; then
+    tw=$ch; th=$cw
+  elif [ "$sw" -gt "$sh" ] && [ "$cw" -lt "$ch" ]; then
+    tw=$ch; th=$cw
+  else
+    tw=$cw; th=$ch
+  fi
+  FIT_TW=$tw; FIT_TH=$th
   new="$tw $th $fps"
   [ "$new" = "$line" ] && return 0                 # 已经是本机分辨率
   desc_replace "$fz" "$line" "$new" || return 1
@@ -305,8 +323,13 @@ cmd_list() {
 cmd_status() {
   an=$(active_name)
   echo "active=${an:-无}"
-  echo "count=$(entry_count)"
+  # 界面要显示「文件位置」：当前动画在库里的源文件 + 刷入的主题路径 + 本机屏幕分辨率
+  echo "active_path=$(active_path)"
+  echo "theme_path=$THEME_FILE"
   echo "library=$LIB_DIR"
+  wh=$(screen_wh)
+  if [ -n "$wh" ]; then echo "screen=${wh%% *}x${wh##* }"; else echo "screen=未知"; fi
+  echo "count=$(entry_count)"
   if [ -f "$THEME_FILE" ]; then
     echo "theme_size=$(file_size "$THEME_FILE")"
     echo "theme_ok=yes"
@@ -354,19 +377,109 @@ cmd_fit() {
   [ -n "$wh" ] || { echo "ERROR 读不到本机分辨率"; return 1; }
   n=$(name_of "$p")
   if fit_zip "$p"; then
+    to="${FIT_TW}x${FIT_TH}"                       # 方向感知后实际写入的宽高
     if [ "$n" = "$(active_name)" ]; then
       if deploy_active >/dev/null 2>&1; then
-        echo "OK fitted=$n to=${wh%% *}x${wh##* } (redeployed)"
+        echo "OK fitted=$n to=$to (redeployed)"
       else
-        echo "OK fitted=$n to=${wh%% *}x${wh##* } (但重新部署失败)"
+        echo "OK fitted=$n to=$to (但重新部署失败)"
       fi
     else
-      echo "OK fitted=$n to=${wh%% *}x${wh##* }"
+      echo "OK fitted=$n to=$to"
     fi
   else
     echo "ERROR 适配失败：新分辨率串比原来的长，或 desc 不是标准格式"
     return 1
   fi
+}
+
+# 只读：打印某动画当前的 desc 分辨率（兼容标准「宽 高 帧率」和小米「g 宽 高 偏移x 偏移y 帧率」）
+# 给界面里「分辨率」面板用，不写文件。
+cmd_desc() {
+  idx="$1"
+  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: desc N"; return 1;; esac
+  p=$(entry_at "$idx")
+  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
+  line=$(unzip -p "$p" desc.txt 2>/dev/null | tr -d '\r' | awk '!/^[ ]*#/ && NF {print; exit}')
+  [ -n "$line" ] || { echo "ERROR 读不到 desc.txt"; return 1; }
+  set -- $line
+  case "$1" in
+    g) w=$2; h=$3; fps=$6 ;;                       # 小米 g 写法
+    *) w=$1; h=$2; fps=$3 ;;                       # 标准写法
+  esac
+  case "$w" in ''|*[!0-9]*) echo "ERROR desc 不是标准格式"; return 1;; esac
+  case "$h" in ''|*[!0-9]*) echo "ERROR desc 不是标准格式"; return 1;; esac
+  case "$fps" in ''|*[!0-9]*) fps=30 ;; esac
+  echo "desc_w=$w"
+  echo "desc_h=$h"
+  echo "desc_fps=$fps"
+  wh=$(screen_wh)
+  if [ -n "$wh" ]; then echo "screen=${wh%% *}x${wh##* }"; else echo "screen=未知"; fi
+  echo "desc_line=$line"
+  return 0
+}
+
+# 手动设置某动画的 desc 分辨率（帧率保留）。设备上不能重建 zip，新串不能比原行长。
+cmd_setres() {
+  idx="$1"; w="$2"; h="$3"
+  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: setres N 宽 高"; return 1;; esac
+  case "$w" in ''|*[!0-9]*) echo "ERROR 宽必须是数字"; return 1;; esac
+  case "$h" in ''|*[!0-9]*) echo "ERROR 高必须是数字"; return 1;; esac
+  p=$(entry_at "$idx")
+  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
+  normalize_zip "$p" >/dev/null 2>&1               # 先归一化，保证读到标准行、$3 是帧率
+  line=$(desc_line "$p")
+  [ -n "$line" ] || { echo "ERROR 读不到 desc.txt"; return 1; }
+  set -- $line
+  case "$3" in ''|*[!0-9]*) fps=30 ;; *) fps=$3 ;; esac
+  n=$(name_of "$p")
+  new="$w $h $fps"
+  desc_replace "$p" "$line" "$new"; rc=$?
+  case "$rc" in
+    0) ;;
+    2) echo "ERROR 新分辨率串比原来的长，写不进去（设备上不能重建 zip）"; return 1;;
+    *) echo "ERROR 写入 desc 失败"; return 1;;
+  esac
+  log "setres: $line -> $new ($p)"
+  if [ "$n" = "$(active_name)" ]; then
+    if deploy_active >/dev/null 2>&1; then echo "OK setres=$n to=${w}x${h} (redeployed)"
+    else echo "OK setres=$n to=${w}x${h} (但重新部署失败)"; fi
+  else
+    echo "OK setres=$n to=${w}x${h}"
+  fi
+  return 0
+}
+
+# 交换某动画 desc 的宽高（一键修正长宽互换）。宽高位数相同，串长不变，必能写入。
+cmd_swap() {
+  idx="$1"
+  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: swap N"; return 1;; esac
+  p=$(entry_at "$idx")
+  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
+  normalize_zip "$p" >/dev/null 2>&1
+  line=$(desc_line "$p")
+  [ -n "$line" ] || { echo "ERROR 读不到 desc.txt"; return 1; }
+  set -- $line
+  ow=$1; oh=$2
+  case "$ow" in ''|*[!0-9]*) echo "ERROR desc 不是标准格式"; return 1;; esac
+  case "$oh" in ''|*[!0-9]*) echo "ERROR desc 不是标准格式"; return 1;; esac
+  case "$3" in ''|*[!0-9]*) fps=30 ;; *) fps=$3 ;; esac
+  n=$(name_of "$p")
+  new="$oh $ow $fps"                               # 宽高对调
+  desc_replace "$p" "$line" "$new"; rc=$?
+  case "$rc" in
+    0) ;;
+    2) echo "ERROR 交换后串更长，写不进去"; return 1;;
+    *) echo "ERROR 写入 desc 失败"; return 1;;
+  esac
+  log "swap: $line -> $new ($p)"
+  if [ "$n" = "$(active_name)" ]; then
+    if deploy_active >/dev/null 2>&1; then echo "OK swap=$n to=${oh}x${ow} (redeployed)"
+    else echo "OK swap=$n to=${oh}x${ow} (但重新部署失败)"; fi
+  else
+    echo "OK swap=$n to=${oh}x${ow}"
+  fi
+  return 0
 }
 
 cmd_import() {
@@ -498,6 +611,9 @@ case "$1" in
   info) cmd_info ;;
   select) cmd_select "$2" ;;
   fit) cmd_fit "$2" ;;
+  desc) cmd_desc "$2" ;;
+  setres) cmd_setres "$2" "$3" "$4" ;;
+  swap) cmd_swap "$2" ;;
   import) cmd_import "$2" ;;
   delete) cmd_delete "$2" ;;
   scan) cmd_scan ;;
@@ -507,5 +623,5 @@ case "$1" in
   guard) install_guard && echo "OK guard installed" ;;
   unguard) remove_guard && echo "OK guard removed" ;;
   deploy) deploy_active && echo "OK deployed" ;;
-  *) echo "用法: $0 {list|status|info|select N|fit N|import PATH|delete N|scan|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
+  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|import PATH|delete N|scan|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
 esac

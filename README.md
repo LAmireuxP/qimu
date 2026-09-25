@@ -69,8 +69,12 @@ adb shell su -c "strings /system/lib64/libbootanimation_preapex.so | grep theme/
 
 动画格式不对的会被自动处理：小米系动画的 desc.txt 首行常写成 `g 宽 高 偏移x 偏移y 帧率`，AOSP 的 bootanimation 不认这行（会直接黑屏），本模块在导入和部署时会把它改成标准的 `宽 高 帧率`。
 
-分辨率也会自动适配：desc 首行声明的「宽 高」就是 bootanimation 实际渲染的尺寸——比屏幕小就四周黑边，比屏幕大就被裁掉一圈。应用（部署）时本模块会把它改成屏幕的物理分辨率，让它满屏。改动同样是等长原地覆盖，所以只有新分辨率串不比原来的长时才改得动（低分辨率动画往高分屏改可能因串变长而改不了，这时保持原样）。也可以手动跑 `bin/ctl.sh fit N` 单独适配第 N 个动画。
+分辨率也会自动适配：desc 首行声明的「宽 高」就是 bootanimation 实际渲染的尺寸——比屏幕小就四周黑边，比屏幕大就被裁掉一圈。应用（部署）时本模块会把它改成屏幕的物理分辨率，让它满屏。改动同样是等长原地覆盖，所以只有新分辨率串不比原来的长时才改得动（低分辨率动画往高分屏改可能因串变长而改不了，这时保持原样）。
 
-选择记在 `var/state/selected.txt`，动画放 `/data/adb/bootanims/`，生效路径是 `/data/system/theme/boots/bootanimation.zip`（属主 system_theme，标签 theme_data_file）。开机时 `post-fs-data.sh` 负责写进去，`service.sh` 兜个底。命令行的话 `bin/ctl.sh` 有 `list / status / info / select / import / delete / scan / reset / order / deploy`。
+适配时还会**保留源动画的方向**：`wm size` 在某些机型/ROM 上会按当前旋转或「长边优先」返回，屏幕读到的宽高方向未必和物理竖屏一致。如果源动画是竖屏、屏幕却读到横屏，直接写进去就会出现「长宽互换」。所以本模块在方向相反时先把屏幕宽高对调再写，保证写进去的方向和源动画一致。自动适配仍不对的话，界面上每个动画都能点「分辨率」手动调：显示当前分辨率和本机屏幕，可以「自适应屏幕」「交换宽高」，或直接填自定义宽高（帧率保留）。命令行对应 `bin/ctl.sh fit N`（自适应）、`swap N`（交换宽高）、`setres N 宽 高`（自定义）、`desc N`（只读当前分辨率）。
+
+界面「当前动画」那栏会显示这个动画在库里的源文件路径、刷入的主题路径（`/data/system/theme/boots/bootanimation.zip`）和本机屏幕分辨率，能看清「文件在哪、刷到哪」。
+
+选择记在 `var/state/selected.txt`，动画放 `/data/adb/bootanims/`，生效路径是 `/data/system/theme/boots/bootanimation.zip`（属主 system_theme，标签 theme_data_file）。开机时 `post-fs-data.sh` 负责写进去，`service.sh` 兜个底。命令行的话 `bin/ctl.sh` 有 `list / status / info / select / fit / desc / setres / swap / import / delete / scan / ls / reset / order / guard / unguard / deploy`。
 
 协议 MIT。仓库里没有商业 IP 的动画：内置的 LineageOS 那个是从 LineageOS 开源项目拿的，只当个默认例子，版权还是人家的；「不播放动画」是一帧纯黑。

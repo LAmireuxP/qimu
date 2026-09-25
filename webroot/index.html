@@ -100,7 +100,12 @@
   .seg button[aria-pressed="true"]{background:var(--card);color:var(--fg);box-shadow:var(--shadow)}
   .path{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--sub);
         background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;
-        margin-bottom:10px;word-break:break-all}
+        margin-bottom:10px;word-break:break-all;white-space:pre-wrap;line-height:1.8}
+  input.num{width:78px;padding:7px 9px;border:1px solid var(--line);border-radius:9px;
+        background:var(--card2);color:var(--fg);font:15px inherit;font-family:inherit;
+        text-align:center;-webkit-appearance:none;appearance:none}
+  input.num:focus{outline:none;border-color:var(--accent)}
+  .sep{color:var(--sub);font-size:13px;flex:0 0 auto}
   #toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%) translateY(20px);
          background:var(--toast-bg);border:1px solid var(--line);color:var(--fg);padding:11px 17px;
          border-radius:11px;font-size:13.5px;max-width:86%;opacity:0;pointer-events:none;
@@ -134,6 +139,7 @@
       <div class="meta" id="cur-meta"></div>
     </div>
   </div>
+  <div class="path" id="cur-path" style="display:none"></div>
 </div>
 
 <div class="card">
@@ -163,6 +169,27 @@
   <div id="browse-list"></div>
   <div class="hint">点文件夹进去翻，找到动画 zip 点右边的「导入」。<br>
     换目录时用第一行的「⬆ 上一级」，或者点「选择文件」重新从「下载」目录开始。</div>
+</div>
+
+<div class="card" id="res-card" style="display:none">
+  <h2>调整分辨率 · <span id="res-name"></span></h2>
+  <div class="path" id="res-info"></div>
+  <div class="hint" id="res-hint">改的是库里这份副本的 desc.txt；正在使用的动画改完会自动重新刷入。</div>
+  <div class="toolbar" style="margin-top:10px;margin-bottom:0">
+    <button class="btn ghost" id="btn-res-fit">自适应屏幕</button>
+    <button class="btn ghost" id="btn-res-swap">交换宽高</button>
+  </div>
+  <div class="row" style="margin-top:10px;align-items:center">
+    <div class="info"><div class="nm" style="font-size:13px;font-weight:600">自定义宽高</div>
+      <div class="dt" style="margin-top:1px">保留原帧率，只改宽高</div></div>
+    <input id="res-w" class="num" type="number" inputmode="numeric" placeholder="宽">
+    <span class="sep">×</span>
+    <input id="res-h" class="num" type="number" inputmode="numeric" placeholder="高">
+    <button class="btn" id="btn-res-set">应用</button>
+  </div>
+  <div class="toolbar" style="margin-top:10px;margin-bottom:0">
+    <button class="btn ghost" id="btn-res-close" style="flex:1">关闭</button>
+  </div>
 </div>
 
 <div id="toast"></div>
@@ -507,6 +534,18 @@
       ? "已写入主题路径，重启生效 · " + bytes(props.theme_size)
       : "还没写入，切个动画就会写";
 
+    // 文件位置：当前动画在库里的源文件 + 刷入的主题路径 + 本机屏幕分辨率
+    const ap = props.active_path || "";
+    const tp = props.theme_path || "/data/system/theme/boots/bootanimation.zip";
+    const sc = props.screen || "";
+    const cp = $("cur-path");
+    let ptxt = "";
+    if (ap) ptxt += "库文件：" + ap + "\n";
+    ptxt += "刷入位置：" + tp + "\n";
+    if (sc && sc !== "未知") ptxt += "本机屏幕：" + sc;
+    if (ptxt) { cp.style.display = ""; cp.textContent = ptxt.replace(/\n$/, ""); }
+    else cp.style.display = "none";
+
     const rows = ls.split("\n").filter(l => l.trim());
     if (!rows.length) { box.innerHTML = '<div class="empty">动画库为空</div>'; return; }
     box.innerHTML = "";
@@ -563,6 +602,14 @@
         else toast(friendly(r), "err");
       });
       row.appendChild(apply);
+
+      // 分辨率调整：自适应屏幕 / 交换宽高 / 自定义宽高
+      const res = document.createElement("button");
+      res.className = "btn ghost";
+      res.textContent = "分辨率";
+      res.style.padding = "7px 8px";
+      res.onclick = () => withBusy(() => openRes(row.dataset.idx, name));
+      row.appendChild(res);
 
       if (active !== "yes") {
         const del = document.createElement("button");
@@ -679,6 +726,61 @@
       box.appendChild(row);
     });
   }
+
+  /* ------------------ 分辨率调整 ------------------ */
+  // 面板上下文：当前在调哪个动画（编号会随排序变，每次开面板时记下当时的编号）
+  let resCtx = null;
+
+  async function openRes(idx, name) {
+    resCtx = { idx: String(idx), name };
+    $("res-card").style.display = "";
+    $("res-name").textContent = name;
+    $("res-info").textContent = "读取中…";
+    $("res-w").value = ""; $("res-h").value = "";
+    const out = String(await ctl("desc", idx));
+    if (/^\s*ERROR/.test(out)) { $("res-info").textContent = friendly(out); return; }
+    const p = {};
+    out.split("\n").forEach(l => { const i = l.indexOf("="); if (i > 0) p[l.slice(0, i)] = l.slice(i + 1); });
+    const cur = (p.desc_w && p.desc_h)
+      ? p.desc_w + "×" + p.desc_h + " · " + (p.desc_fps || 30) + "fps"
+      : "未知";
+    let info = "当前分辨率：" + cur;
+    if (p.screen && p.screen !== "未知") info += "\n本机屏幕：" + p.screen;
+    $("res-info").textContent = info;
+    $("res-w").value = p.desc_w || "";
+    $("res-h").value = p.desc_h || "";
+  }
+
+  function closeRes() { $("res-card").style.display = "none"; resCtx = null; }
+
+  $("btn-res-close").onclick = closeRes;
+
+  // 自适应屏幕：交给 ctl.sh fit，方向感知后会保留源动画方向、避免长宽互换
+  $("btn-res-fit").onclick = () => withBusy(async () => {
+    if (!resCtx) return;
+    const r = await ctl("fit", resCtx.idx);
+    if (/OK /.test(r)) { toast("已适配到本机屏幕", "ok"); await openRes(resCtx.idx, resCtx.name); await refresh(); }
+    else toast(friendly(r), "err");
+  });
+
+  // 交换宽高：一键修正长宽互换
+  $("btn-res-swap").onclick = () => withBusy(async () => {
+    if (!resCtx) return;
+    const r = await ctl("swap", resCtx.idx);
+    if (/OK /.test(r)) { toast("已交换宽高", "ok"); await openRes(resCtx.idx, resCtx.name); await refresh(); }
+    else toast(friendly(r), "err");
+  });
+
+  // 自定义宽高（帧率保留）
+  $("btn-res-set").onclick = () => withBusy(async () => {
+    if (!resCtx) return;
+    const w = ($("res-w").value || "").trim();
+    const h = ($("res-h").value || "").trim();
+    if (!/^\d+$/.test(w) || !/^\d+$/.test(h)) { toast("宽和高都得是数字", "err"); return; }
+    const r = await ctl("setres", resCtx.idx, w, h);
+    if (/OK /.test(r)) { toast("已设为 " + w + "×" + h, "ok"); await openRes(resCtx.idx, resCtx.name); await refresh(); }
+    else toast(friendly(r), "err");
+  });
 
   /* ------------------ 启动 ------------------ */
   async function boot() {
