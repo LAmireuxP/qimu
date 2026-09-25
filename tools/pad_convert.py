@@ -40,7 +40,7 @@ def pad_frame(data, canvas=None):
 
 def encode_png(im):
     buf = io.BytesIO()
-    im.save(buf, 'PNG', optimize=True)
+    im.save(buf, 'PNG')            # 无损；不开 optimize（多轮压缩只省体积、不影响画质，太慢）
     return buf.getvalue()
 
 
