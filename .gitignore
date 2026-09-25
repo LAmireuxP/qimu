@@ -8,3 +8,6 @@ __pycache__/
 # local build / temp
 *.log
 .tmp/
+
+# 出包产物走 GitHub Release，不进版本库（每发一版 .git 涨 ~8MB）
+release/

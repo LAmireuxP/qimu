@@ -35,6 +35,8 @@ OLD_STATE="/data/adb/modules/custom_bootanimation/var/state"
 if [ ! -s "$STATE/selected.txt" ] && [ -s "$OLD_STATE/selected.txt" ]; then
   cp -f "$OLD_STATE/selected.txt" "$STATE/selected.txt" 2>/dev/null
   [ -s "$OLD_STATE/order.txt" ] && cp -f "$OLD_STATE/order.txt" "$STATE/order.txt" 2>/dev/null
+  # 手动分辨率名单也要沿用，不然升级一次，手动设过的动画又被自动适配覆盖回去
+  [ -s "$OLD_STATE/manual.txt" ] && cp -f "$OLD_STATE/manual.txt" "$STATE/manual.txt" 2>/dev/null
   ui_print "- 已沿用上次的选择：$(cat "$STATE/selected.txt" 2>/dev/null)"
 fi
 

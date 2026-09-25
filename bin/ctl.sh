@@ -22,9 +22,14 @@ STAMP_FILE="$STATE_DIR/deployed.stamp"
 SCAN_DIRS="/sdcard/Download /storage/emulated/0/Download /sdcard/CustomBoot /sdcard /data/local/tmp"
 NO_ANIM_NAME="不播放动画"
 ORDER_FILE="$STATE_DIR/order.txt"
+# 手动分辨率名单：在界面/命令里 setres、swap 设过的动画记在这里，
+# 部署/导入时的自动适配跳过它们（否则一部署就被「适配到屏幕」覆盖回去，手动调的等于白调）
+MANUAL_FILE="$STATE_DIR/manual.txt"
 
 # fit_zip 算好后把「目标宽 高」放这里，供 cmd_fit 汇报用
 FIT_TW=""; FIT_TH=""
+# desc_replace 改写成功就置 1，部署据此判断「desc 变过了，必须重拷生效文件」
+FIT_WROTE=""
 
 mkdir -p "$LIB_DIR" "$STATE_DIR" "$LOG_DIR" 2>/dev/null
 
@@ -55,21 +60,19 @@ VALID_MSG=""
 validate_zip() {
   vf="$1"; VALID_MSG=""
   [ -s "$vf" ] || { VALID_MSG="文件不存在或为空"; return 1; }
-  [ "$(dd if="$vf" bs=2 count=1 2>/dev/null)" = "PK" ] || { VALID_MSG="不是有效的 zip 文件"; return 1; }
+  # 一次 dd+od 读本地文件头前 10 字节：偏移 0-1 是 PK 魔数（80 75），
+  # 偏移 8-9 是压缩方法（0 0 = STORED）。比原先两次 dd 少 2 次 fork
+  v_hdr=$(dd if="$vf" bs=1 count=10 2>/dev/null | od -An -tu1 2>/dev/null)
+  set -- $v_hdr
+  [ "$1" = "80" ] && [ "$2" = "75" ] || { VALID_MSG="不是有效的 zip 文件"; return 1; }
+  # 注意 ${10} 要带花括号：$10 会被当成 ${1}0（mksh/bash 都这样）
+  [ "$9" = "0" ] && [ "${10}" = "0" ] || { VALID_MSG="动画必须是 ZIP_STORED 无压缩格式"; return 1; }
   command -v unzip >/dev/null 2>&1 || return 0
 
-  # 1) 根目录必须有 desc.txt（用 -l 列表 + grep，不依赖任何列格式）
+  # 根目录必须有 desc.txt（用 -l 列表 + grep，不依赖任何列格式）
   unzip -l "$vf" 2>/dev/null | grep -q 'desc\.txt' || { VALID_MSG="zip 根目录缺少 desc.txt"; return 1; }
 
-  # 2) 压缩方式：直接读第一个本地文件头的「压缩方法」字段（偏移 8-9，小端；0=STORED）
-  #    与 unzip 实现无关，也比解析 unzip -v 的列更可靠
-  m=$(dd if="$vf" bs=1 skip=8 count=2 2>/dev/null | od -An -tu1 2>/dev/null | tr -s ' ')
-  case "$m" in
-    " 0 0") ;;
-    *) VALID_MSG="动画必须是 ZIP_STORED 无压缩格式"; return 1 ;;
-  esac
-
-  # 3) 兜底全量检查：若该 unzip 的 -v 会打印方法名，出现压缩方法名即拒绝（覆盖混合压缩包）
+  # 兜底全量检查：若该 unzip 的 -v 会打印方法名，出现压缩方法名即拒绝（覆盖混合压缩包）
   if unzip -v "$vf" 2>/dev/null | grep -qE 'Defl|DefN|BZip2|LZMA|Zstd'; then
     VALID_MSG="动画必须是 ZIP_STORED 无压缩格式"
     return 1
@@ -129,9 +132,42 @@ desc_replace() {
   dr_g=$(grep -abo "$dr_old" "$dr_f" 2>/dev/null) || return 1
   dr_off=${dr_g%%:*}                             # 多处匹配时取第一处；desc 行里不会有冒号
   [ -n "$dr_off" ] || return 1
-  printf '%s' "$dr_repl" | dd of="$dr_f" bs=1 seek="$dr_off" conv=notrunc 2>/dev/null || return 1
-  rm -f "$STAMP_FILE" 2>/dev/null
-  return 0
+  if printf '%s' "$dr_repl" | dd of="$dr_f" bs=1 seek="$dr_off" conv=notrunc 2>/dev/null; then
+    FIT_WROTE=1                                  # 标记 desc 被改写过，部署据此决定必须重拷
+    rm -f "$STAMP_FILE" 2>/dev/null
+    return 0
+  fi
+  return 1
+}
+
+# ---------- 手动分辨率名单 ----------
+# setres/swap 设过的动画记在 manual.txt，部署/导入的自动适配跳过它们——
+# 不然给正在使用的动画手动设的分辨率一部署就被「适配到屏幕」覆盖回去。
+# 点「自适应屏幕」（cmd_fit）会把名字移出名单，恢复自动适配。
+manual_has() {
+  [ -s "$MANUAL_FILE" ] || return 1
+  mn_has=0
+  while IFS= read -r mn_l || [ -n "$mn_l" ]; do
+    [ "${mn_l%"$CR"}" = "$1" ] && { mn_has=1; break; }
+  done <"$MANUAL_FILE"
+  [ "$mn_has" -eq 1 ]
+}
+manual_add() {
+  manual_has "$1" && return 0
+  printf '%s\n' "$1" >>"$MANUAL_FILE" 2>/dev/null
+  log "manual res: $1"
+}
+manual_del() {
+  [ -f "$MANUAL_FILE" ] || return 0
+  mn_tmp="$STATE_DIR/.manual.$$.tmp"
+  : >"$mn_tmp" 2>/dev/null || return 0
+  while IFS= read -r mn_l || [ -n "$mn_l" ]; do
+    mn_l=${mn_l%"$CR"}
+    [ -n "$mn_l" ] || continue
+    [ "$mn_l" = "$1" ] && continue
+    printf '%s\n' "$mn_l" >>"$mn_tmp"
+  done <"$MANUAL_FILE"
+  mv -f "$mn_tmp" "$MANUAL_FILE" 2>/dev/null || rm -f "$mn_tmp"
 }
 
 # 本机屏幕物理分辨率（输出「宽 高」；读不到就输出空）。只 fork 一次 wm，行解析用纯 shell
@@ -177,6 +213,7 @@ normalize_zip() {
 # 屏幕宽高对调再写，保证写进去的方向和源动画一致。
 fit_zip() {
   fz="$1"; [ -f "$fz" ] || return 1
+  if manual_has "$(name_of "$fz")"; then return 0; fi   # 手动设定过的，自动适配不碰
   line=$(desc_line "$fz"); [ -n "$line" ] || return 1
   parse_desc_line "$line" || return 1              # g 写法这里也能解析，写入时顺带归一化
   wh=$(screen_wh)
@@ -310,8 +347,6 @@ deploy_active() {
   ap=$(active_path)
   if [ -z "$ap" ]; then log "deploy skipped: no active animation"; return 1; fi
   an=$(active_name)
-  # 顺手改写 desc 首行：归一化 g 写法 + 适配本机分辨率（改过会清掉 stamp，下面自然重拷一次）
-  fit_zip "$ap" >/dev/null 2>&1
   new_size=$(file_size "$ap")
   stamp_val="$an:$new_size"
 
@@ -326,6 +361,21 @@ deploy_active() {
   # 守卫脚本随部署一并确保存在（模块被关闭后由它负责清理）
   install_guard
 
+  # 快路径：主题文件在、大小一致、stamp 一致 → 就是本模块上次写的那份，直接跳过。
+  # fit 也不用跑：fit/setres/swap 改过 desc 都会清掉 stamp，stamp 还在就说明 desc 没动过。
+  # （旧顺序每次开机都先白跑一遍 fit 的 unzip+wm——post-fs-data 阶段 wm 根本连不上）
+  if [ -f "$THEME_FILE" ] && [ "$(file_size "$THEME_FILE")" = "$new_size" ]; then
+    if [ "$(cat "$STAMP_FILE" 2>/dev/null)" = "$stamp_val" ]; then
+      log "theme already current (stamp)"
+      return 0
+    fi
+  fi
+
+  # 慢路径：先归一化 g 写法 + 适配本机分辨率（等长原地覆盖，大小不变；改过会清 stamp）
+  fit_zip "$ap" >/dev/null 2>&1
+  new_size=$(file_size "$ap")
+  stamp_val="$an:$new_size"
+
   if [ ! -d "$THEME_DIR" ]; then
     mkdir -p "$THEME_DIR" 2>/dev/null || { log "theme dir create failed"; return 1; }
   fi
@@ -333,12 +383,9 @@ deploy_active() {
   chmod 0775 "$THEME_DIR" 2>/dev/null
   chcon u:object_r:theme_data_file:s0 "$THEME_DIR" 2>/dev/null
 
-  if [ -f "$THEME_FILE" ] && [ "$(file_size "$THEME_FILE")" = "$new_size" ]; then
-    # 大小一致才有必要细究；stamp 一致说明就是本模块上次写的那一份 → 直接跳过
-    if [ "$(cat "$STAMP_FILE" 2>/dev/null)" = "$stamp_val" ]; then
-      log "theme already current (stamp)"
-      return 0
-    fi
+  # desc 没被这次部署改写（FIT_WROTE 空）且大小一致 → 主题里那份多半就是当前的，
+  # md5 确认后跳过；desc 改写过就无论如何重拷，保证手动设的分辨率真落到生效文件上
+  if [ -z "$FIT_WROTE" ] && [ -f "$THEME_FILE" ] && [ "$(file_size "$THEME_FILE")" = "$new_size" ]; then
     if command -v md5sum >/dev/null 2>&1; then
       if [ "$(md5sum "$THEME_FILE" 2>/dev/null | awk '{print $1}')" = "$(md5sum "$ap" 2>/dev/null | awk '{print $1}')" ]; then
         printf '%s\n' "$stamp_val" >"$STAMP_FILE" 2>/dev/null
@@ -455,6 +502,7 @@ cmd_fit() {
   wh=$(screen_wh)
   [ -n "$wh" ] || { echo "ERROR 读不到本机分辨率"; return 1; }
   n=$(name_of "$p")
+  manual_del "$n"                                # 显式自适应 = 恢复自动，移出手动名单
   if fit_zip "$p"; then
     finish_desc_change fitted "$n" "${FIT_TW}x${FIT_TH}"   # 方向感知后实际写入的宽高
   else
@@ -475,6 +523,7 @@ cmd_desc() {
   echo "desc_w=$D_W"
   echo "desc_h=$D_H"
   echo "desc_fps=$D_FPS"
+  if manual_has "$(name_of "$p")"; then echo "mode=manual"; else echo "mode=auto"; fi
   wh=$(screen_wh)
   if [ -n "$wh" ]; then echo "screen=${wh%% *}x${wh##* }"; else echo "screen=未知"; fi
   echo "desc_line=$line"
@@ -502,6 +551,7 @@ cmd_setres() {
     *) echo "ERROR 写入 desc 失败"; return 1;;
   esac
   log "setres: $line -> $new ($p)"
+  manual_add "$n"                                # 手动设定过，自动适配不再碰它
   finish_desc_change setres "$n" "${w}x${h}"
 }
 
@@ -523,6 +573,7 @@ cmd_swap() {
     *) echo "ERROR 写入 desc 失败"; return 1;;
   esac
   log "swap: $line -> $new ($p)"
+  manual_add "$n"
   finish_desc_change swap "$n" "${D_H}x${D_W}"
 }
 
@@ -581,6 +632,7 @@ cmd_delete() {
     return 1
   fi
   rm -f "$p" 2>/dev/null || { echo "ERROR 删除失败"; return 1; }
+  manual_del "$n"                                # 名单里残留的手动标记一并清掉
   log "deleted: $p"
   echo "OK deleted=$n"
 }

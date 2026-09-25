@@ -202,6 +202,7 @@
   const CTL = MODDIR + "/bin/ctl.sh";
   const THEME_KEY = "bootanim_theme";
   const SYS_KEY = "bootanim_sysdark";
+  const MODE_KEY = "bootanim_execmode";   // 缓存 ksu.exec 的调用形式，省掉每次开界面的探测等待
 
   let busy = false, execMode = "sync", cbSeq = 0;
   let themeMode = "auto";
@@ -744,7 +745,8 @@
     resFps = parseInt(p.desc_fps, 10) || 30;
     resScreen = p.screen && p.screen !== "未知" ? p.screen : "";
     const cur = (p.desc_w && p.desc_h) ? p.desc_w + "×" + p.desc_h + " · " + resFps + "fps" : "未知";
-    let info = "当前分辨率：" + cur;
+    let info = "当前分辨率：" + cur
+      + "\n适配模式：" + (p.mode === "manual" ? "手动（部署时不再自动适配，点「自适应屏幕」恢复）" : "自动（部署时适配到屏幕）");
     if (resScreen) info += "\n本机屏幕：" + resScreen;
     $("res-info").textContent = info;
     $("res-w").value = p.desc_w || "";
@@ -805,11 +807,38 @@
   });
 
   /* ------------------ 启动 ------------------ */
+  // 确定桥的调用形式，探测结果缓存进 localStorage——async 桥的探测要等 650ms，缓存后
+  // 下次打开直接进列表。缓存不能盲信（桥升级可能换形式，错的形式会让 exec 挂到 60s 超时），
+  // 所以用之前先拿 echo 校验一次（2s 竞速）；失败就清缓存重新探测。各路径 exec 次数
+  // 和不缓存时持平：sync 桥探测本来就是一次 exec，async 桥则省掉整个 650ms 等待。
+  async function resolveExecMode() {
+    let cached = null;
+    try { cached = localStorage.getItem(MODE_KEY); } catch (_) {}
+    if (cached === "sync" || cached === "async" || cached === "async2") {
+      // 探针必须按「缓存的形式」发，验的才是缓存本身——先把 execMode 切过去，失败再回退
+      const prev = execMode;
+      execMode = cached;
+      let out = "";
+      try {
+        out = await Promise.race([
+          run("echo qimu-probe"),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("verify timeout")), 2000)),
+        ]);
+      } catch (_) {}
+      if (String(out).trim() === "qimu-probe") return cached;
+      execMode = prev;
+      try { localStorage.removeItem(MODE_KEY); } catch (_) {}   // 缓存失效，重探
+    }
+    const m = await detectExecMode();
+    try { localStorage.setItem(MODE_KEY, m); } catch (_) {}
+    return m;
+  }
+
   async function boot() {
     try { themeMode = localStorage.getItem(THEME_KEY) || "auto"; } catch (_) { themeMode = "auto"; }
-    // 先探测桥的调用形式：applyTheme 会 exec 问系统深浅色，而探测前 execMode 还是默认的
+    // 先确定桥的调用形式：applyTheme 会 exec 问系统深浅色，而确定前 execMode 还是默认的
     // "sync"，在回调式桥上会拿到空结果、把「跟随系统」判错。
-    if (bridgeReady()) execMode = await detectExecMode();
+    if (bridgeReady()) execMode = await resolveExecMode();
     await applyTheme(true);
 
     if (!bridgeReady()) { toast("未检测到 KernelSU 模块接口，无法读取动画列表", "err"); return; }
