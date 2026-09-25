@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """把任意 AOSP 格式 bootanimation.zip 转为指定尺寸的无压缩版本：
-- 帧按宽度缩放到目标宽，居中贴到目标尺寸黑底（避免竖屏拉伸变形）
+- 帧按 cover 方式缩放（取较大的缩放比）居中裁切到目标尺寸——满屏无黑边、
+  每颗像素都用上（原生分辨率），LANCZOS 高质量重采样 + PNG 无损保存
 - desc.txt 首行改为「目标宽 目标高 <fps>」，保留原有段落定义
 - 全部条目 ZIP_STORED（bootanimation 二进制硬性要求）
 用法: python pad_convert.py <src.zip> <dst.zip> [name] [WxH]
@@ -24,15 +25,20 @@ def parse_desc(raw):
 
 
 def pad_frame(data, target_w=W, canvas=(W, H)):
-    im = Image.open(io.BytesIO(data)).convert('RGBA')
-    if im.width != target_w:
-        nh = max(1, round(im.height * target_w / im.width))
-        im = im.resize((target_w, nh), Image.LANCZOS)
+    """cover 缩放 + 居中裁切到 canvas：满屏无黑边，像素最大化"""
+    im = Image.open(io.BytesIO(data)).convert('RGB')
     cw, ch = canvas
-    out = Image.new('RGBA', (cw, ch), (0, 0, 0, 255))
-    out.paste(im, (0, (ch - im.height) // 2), im)
+    scale = max(cw / im.width, ch / im.height)
+    nw, nh = max(cw, round(im.width * scale)), max(ch, round(im.height * scale))
+    if (nw, nh) != (im.width, im.height):
+        im = im.resize((nw, nh), Image.LANCZOS)
+    left, top = (nw - cw) // 2, (nh - ch) // 2
+    return im.crop((left, top, left + cw, top + ch))
+
+
+def encode_png(im):
     buf = io.BytesIO()
-    out.convert('RGB').save(buf, 'PNG', optimize=True)
+    im.save(buf, 'PNG', optimize=True)
     return buf.getvalue()
 
 
@@ -52,7 +58,7 @@ def convert(src, dst, name=''):
                 zout.writestr(zi, b'')
             for n in frames:
                 zi = zipfile.ZipInfo(n); zi.compress_type = zipfile.ZIP_STORED
-                zout.writestr(zi, pad_frame(zin.read(n)))
+                zout.writestr(zi, encode_png(pad_frame(zin.read(n))))
     print(f'{name or src}: {len(frames)} frames -> {os.path.getsize(dst)} bytes; desc={newdesc.strip()[:50]!r}')
 
 
