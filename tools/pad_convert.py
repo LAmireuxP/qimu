@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""把任意 AOSP 格式 bootanimation.zip 转为 K60Pro 可用的无压缩版本：
-- 帧按宽度缩放到 1440，居中贴到 1440x3120 黑底（避免竖屏拉伸变形）
-- desc.txt 首行改为 1440 3120 <fps>，保留原有段落定义
+"""把任意 AOSP 格式 bootanimation.zip 转为指定尺寸的无压缩版本：
+- 帧按宽度缩放到目标宽，居中贴到目标尺寸黑底（避免竖屏拉伸变形）
+- desc.txt 首行改为「目标宽 目标高 <fps>」，保留原有段落定义
 - 全部条目 ZIP_STORED（bootanimation 二进制硬性要求）
-用法: python pad_convert.py <src.zip> <dst.zip> [name]
+用法: python pad_convert.py <src.zip> <dst.zip> [name] [WxH]
+  WxH 缺省 1440x3120（K60 Pro）；给别的机器用传各自屏幕尺寸，如 1080x2400
 """
 import sys, os, io, zipfile
 from PIL import Image
 
 W, H = 1440, 3120
+if len(sys.argv) > 4:
+    W, H = (int(x) for x in sys.argv[4].lower().split('x', 1))
 
 
 def parse_desc(raw):
