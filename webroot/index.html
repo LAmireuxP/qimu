@@ -154,6 +154,7 @@
   <button class="btn ghost" id="btn-refresh">刷新</button>
   <button class="btn ghost" id="btn-scan">扫描目录</button>
   <button class="btn ghost" id="btn-browse">选择文件</button>
+  <button class="btn ghost" id="btn-vid">视频转换</button>
 </div>
 
 <div class="card" id="scan-card" style="display:none">
@@ -196,6 +197,35 @@
   <div class="toolbar" style="margin-top:10px;margin-bottom:0">
     <button class="btn ghost" id="btn-res-close" style="flex:1">关闭</button>
   </div>
+</div>
+
+<div class="card" id="vid-card" style="display:none">
+  <h2>视频转动画</h2>
+  <div id="vid-list"></div>
+  <div id="vid-cfg" style="display:none">
+    <div class="path" id="vid-sel"></div>
+    <div class="row" style="align-items:center">
+      <div class="info"><div class="nm" style="font-size:13px;font-weight:600">帧率</div>
+        <div class="dt" style="margin-top:1px">抽帧节奏，默认 30（高帧率解码吃力）</div></div>
+      <input id="vid-fps" class="num" type="number" inputmode="numeric" value="30">
+    </div>
+    <div class="row" style="align-items:center">
+      <div class="info"><div class="nm" style="font-size:13px;font-weight:600">播放方式</div>
+        <div class="dt" style="margin-top:1px">自动 = 短视频循环播到进系统</div></div>
+      <div class="seg" id="vid-loop">
+        <button type="button" data-v="auto" aria-pressed="true">自动</button>
+        <button type="button" data-v="loop" aria-pressed="false">循环</button>
+        <button type="button" data-v="once" aria-pressed="false">播一遍</button>
+      </div>
+    </div>
+    <div class="toolbar" style="margin-top:10px;margin-bottom:0">
+      <button class="btn" id="btn-vid-go" style="flex:1">开始转换并导入</button>
+    </div>
+    <div class="dt" id="vid-prog" style="margin-top:9px;color:var(--sub);font-size:12.5px"></div>
+  </div>
+  <div class="hint">选一个视频（在「下载」或「影片」目录），转成动画包并自动导入动画库。<br>
+    画质：原生分辨率满屏、JPG 高质量；帧数上限 600 帧，长视频建议先剪短；<br>
+    视频里的音轨会一并存档（开机动画本身不播声音）。格式需网页能解：MP4/H.264 最稳。</div>
 </div>
 
 <div id="toast"></div>
@@ -535,6 +565,10 @@
 
     const props = {};
     st.split("\n").forEach(l => { const i = l.indexOf("="); if (i > 0) props[l.slice(0, i)] = l.slice(i + 1); });
+    if (props.screen && /^\d+x\d+$/.test(props.screen)) {
+      const sa = props.screen.split("x");
+      screenW = parseInt(sa[0], 10) || screenW; screenH = parseInt(sa[1], 10) || screenH;
+    }
 
     $("cur-name").textContent = props.active || "无";
     $("cur-meta").textContent = props.theme_ok === "yes"
@@ -726,6 +760,7 @@
 
     rows.forEach(line => {
       const p = line.split("\t");
+      if (p[0] === "V") return;                        // 视频在「视频转换」里处理，这里不显示
       const row = document.createElement("div");
       row.className = "row";
       const info = document.createElement("div");
@@ -756,6 +791,194 @@
       }
       box.appendChild(row);
     });
+  }
+
+  /* ------------------ 视频转动画 ------------------ */
+  // 全程在手机本地完成：WebView 用系统解码器抽帧（<video>+canvas），
+  // JS 打 STORED zip（自带 CRC32，不依赖设备上的 zip 工具），root 桥分块写回再走 import。
+  const VID_EXTS = ["mp4", "mov", "mkv", "webm", "m4v", "3gp"];
+  const VID_MIME = { mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime",
+                     mkv: "video/x-matroska", webm: "video/webm", "3gp": "video/3gpp" };
+  let vidSel = null, vidFps = 30, vidLoop = "auto";
+  let screenW = 1080, screenH = 2400;
+
+  function b64ToBytes(b64) {
+    const s = atob(b64), u = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+    return u;
+  }
+  function bytesToB64(u8) {
+    let s = "";
+    for (let i = 0; i < u8.length; i += 8192)
+      s += String.fromCharCode.apply(null, u8.subarray(i, i + 8192));
+    return btoa(s);
+  }
+  const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  function crc32(u8) { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = CRC_T[(c ^ u8[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+  const u16le = v => new Uint8Array([v & 255, (v >> 8) & 255]);
+  const u32le = v => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
+  function catBytes(list) { let n = 0; list.forEach(b => n += b.length); const o = new Uint8Array(n); let p = 0; list.forEach(b => { o.set(b, p); p += b.length; }); return o; }
+
+  // 最小 STORED zip 写入器（无压缩）：本地头 + 中央目录 + EOCD
+  function buildZip(parts) {
+    const enc = new TextEncoder(), local = [], central = [];
+    let off = 0;
+    for (const { name, data } of parts) {
+      const nm = enc.encode(name), crc = crc32(data);
+      const head = catBytes([u32le(0x04034b50), u16le(20), u16le(0), u16le(0), u16le(0), u16le(0),
+        u32le(crc), u32le(data.length), u32le(data.length), u16le(nm.length), u16le(0), nm]);
+      local.push(head, data);
+      central.push(catBytes([u32le(0x02014b50), u16le(20), u16le(20), u16le(0), u16le(0), u16le(0), u16le(0),
+        u32le(crc), u32le(data.length), u32le(data.length), u16le(nm.length), u16le(0), u16le(0), u16le(0), u16le(0), u32le(0), u32le(off), nm]));
+      off += head.length + data.length;
+    }
+    const cd = catBytes(central);
+    const eocd = catBytes([u32le(0x06054b50), u16le(0), u16le(0), u16le(parts.length), u16le(parts.length), u32le(cd.length), u32le(off), u16le(0)]);
+    return catBytes([...local, cd, eocd]);
+  }
+
+  // 桥的单条命令有长度上限，也为了控制内存：文件按块 dd|base64 读回
+  async function readDeviceBytes(path, onProg) {
+    const sz = parseInt((await run(`wc -c < ${quote(path)}`)).trim(), 10) || 0;
+    if (!sz) throw new Error("读不到视频内容");
+    const CH = 65536, parts = [];
+    for (let off = 0; off < sz; off += CH) {
+      const cnt = Math.min(CH, sz - off);
+      const out = await run(`dd if=${quote(path)} bs=${cnt} skip=${Math.floor(off / CH)} count=1 2>/dev/null | base64`);
+      parts.push(b64ToBytes(String(out).replace(/\s+/g, "")));
+      onProg && onProg(Math.min(off + CH, sz), sz, "读取视频");
+    }
+    return catBytes(parts);
+  }
+  async function writeDeviceBytes(path, bytes, onProg) {
+    await run(`rm -f ${quote(path)}`);
+    const CH = 49152;                                   // b64 后 ~64KB，命令总长远低于上限
+    for (let off = 0; off < bytes.length; off += CH) {
+      const slice = bytes.subarray(off, Math.min(off + CH, bytes.length));
+      await run(`echo '${bytesToB64(slice)}' | base64 -d >> ${quote(path)}`);
+      onProg && onProg(Math.min(off + CH, bytes.length), bytes.length, "写回");
+    }
+    const sz = parseInt((await run(`wc -c < ${quote(path)}`)).trim(), 10) || 0;
+    if (sz !== bytes.length) throw new Error(`写回校验失败（${sz} ≠ ${bytes.length}）`);
+  }
+
+  function audioBufferToWav(buf, maxSec) {
+    const sr = buf.sampleRate, chs = Math.min(2, buf.numberOfChannels);
+    const n = Math.min(buf.length, Math.floor(sr * (maxSec || 30)));
+    const dv = new DataView(new ArrayBuffer(44 + n * chs * 2));
+    const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+    ws(0, "RIFF"); dv.setUint32(4, 36 + n * chs * 2, true); ws(8, "WAVE"); ws(12, "fmt ");
+    dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, chs, true);
+    dv.setUint32(24, sr, true); dv.setUint32(28, sr * chs * 2, true); dv.setUint16(32, chs * 2, true);
+    dv.setUint16(34, 16, true); ws(36, "data"); dv.setUint32(40, n * chs * 2, true);
+    const ch = []; for (let c = 0; c < chs; c++) ch.push(buf.getChannelData(c));
+    let o = 44;
+    for (let i = 0; i < n; i++) for (let c = 0; c < chs; c++) {
+      const v = Math.max(-1, Math.min(1, ch[c][i]));
+      dv.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7FFF, true); o += 2;
+    }
+    return new Uint8Array(dv.buffer);
+  }
+
+  const toBlobP = (cv, type, q) => new Promise((res, rej) => cv.toBlob(b => b ? res(b) : rej(new Error("帧编码失败")), type, q));
+  const seekP = (v, t) => new Promise(res => {
+    let done = false;
+    const fin = () => { if (!done) { done = true; setTimeout(res, 30); } };
+    v.addEventListener("seeked", fin, { once: true });
+    v.currentTime = t;
+    setTimeout(fin, 2000);                              // 个别内核 seek 不派发事件，兜底
+  });
+
+  async function convertVideo(bytes, ext, onProg) {
+    const url = URL.createObjectURL(new Blob([bytes], { type: VID_MIME[ext] || "video/mp4" }));
+    const v = document.createElement("video");
+    v.muted = true; v.preload = "auto"; v.src = url;
+    try {
+      await new Promise((res, rej) => {
+        v.onloadedmetadata = () => res();
+        v.onerror = () => rej(new Error("这个视频网页解不动（MP4/H.264 最稳，别的格式试试转 MP4）"));
+        setTimeout(() => rej(new Error("读取视频超时")), 15000);
+      });
+      const dur = v.duration, vw = v.videoWidth, vh = v.videoHeight;
+      if (!isFinite(dur) || dur <= 0 || !vw || !vh) throw new Error("视频信息异常");
+      let n = Math.max(1, Math.min(Math.round(dur * vidFps), 600));   // 帧数上限 600
+      const fpsEff = Math.max(1, Math.min(60, Math.round(n / dur)));
+      const loop = vidLoop === "loop" || (vidLoop === "auto" && dur < 8);
+      onProg(`视频 ${vw}×${vh} ${dur.toFixed(1)}s → ${n} 帧 ${fpsEff}fps${loop ? "（循环）" : "（播一遍）"}`, 5);
+
+      const cv = document.createElement("canvas"); cv.width = screenW; cv.height = screenH;
+      const ctx = cv.getContext("2d");
+      const parts = [{ name: "desc.txt", data: new TextEncoder().encode(`${screenW} ${screenH} ${fpsEff}\np ${loop ? 0 : 1} 0 part0\n`) }];
+      for (let i = 0; i < n; i++) {
+        await seekP(v, Math.min((i + 0.5) * dur / n, Math.max(0, dur - 0.05)));
+        const s = Math.max(screenW / vw, screenH / vh);   // cover：满屏无黑边
+        ctx.fillStyle = "#000"; ctx.fillRect(0, 0, screenW, screenH);
+        ctx.drawImage(v, (screenW - vw * s) / 2, (screenH - vh * s) / 2, vw * s, vh * s);
+        const b = await toBlobP(cv, "image/jpeg", 0.92);
+        parts.push({ name: `part0/${String(i + 1).padStart(5, "0")}.jpg`, data: new Uint8Array(await b.arrayBuffer()) });
+        onProg(`抽帧 ${i + 1}/${n}`, 5 + Math.round(((i + 1) / n) * 60));
+      }
+      try {                                               // 音轨 → WAV 留档（最多 30s）
+        onProg("提取音轨…", 70);
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          const ac = new AC();
+          const buf = await ac.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length));
+          if (buf && buf.length > 0) parts.push({ name: "sound/poweron.wav", data: audioBufferToWav(buf, 30) });
+          ac.close && ac.close();
+        }
+      } catch (_) { /* 没音轨或解不了就跳过 */ }
+
+      onProg("打包 zip…", 78);
+      const zip = buildZip(parts);
+      const tmp = `/data/local/tmp/qimu_v2b_${Date.now()}.zip`;
+      let lastP = 0;
+      await writeDeviceBytes(tmp, zip, (d, t) => {
+        const p = 80 + Math.round((d / t) * 18);
+        if (p !== lastP) { lastP = p; onProg(`写回 ${Math.round((d / t) * 100)}%`, p); }
+      });
+      onProg("导入动画库…", 99);
+      const r = await ctl("import", tmp);
+      await run(`rm -f ${quote(tmp)}`);
+      if (!/OK /.test(r)) throw new Error(friendly(r));
+      return { stored: (/stored=(\S+)/.exec(r) || [])[1] || "", audio: +((/audio=(\d+)/.exec(r) || [])[1] || 0), frames: n, fps: fpsEff };
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function openVid() {
+    $("vid-card").style.display = "";
+    $("vid-cfg").style.display = "none";
+    $("vid-prog").textContent = "";
+    const box = $("vid-list"); box.innerHTML = '<div class="empty">扫描视频…</div>';
+    const vids = [];
+    for (const dir of ["/sdcard/Download", "/sdcard/Movies"]) {
+      const out = String(await ctl("ls", dir)).replace(/\r\n/g, "\n");
+      if (/^\s*ERROR/.test(out)) continue;
+      out.split("\n").forEach(l => {
+        const p = l.split("\t");
+        if (p[0] === "V" && p[3] && !vids.some(x => x.path === p[3])) vids.push({ name: p[1], size: p[2], path: p[3] });
+      });
+    }
+    box.innerHTML = "";
+    if (!vids.length) { box.innerHTML = '<div class="empty">「下载」和「影片」目录里没有视频（mp4/mov/mkv/webm）</div>'; return; }
+    vids.forEach(v => {
+      const row = document.createElement("div"); row.className = "row";
+      const info = document.createElement("div"); info.className = "info";
+      const nm = document.createElement("div"); nm.className = "nm"; nm.textContent = v.name;
+      const dt = document.createElement("div"); dt.className = "dt"; dt.textContent = bytes(v.size);
+      info.appendChild(nm); info.appendChild(dt); row.appendChild(info);
+      const b = document.createElement("button"); b.className = "btn"; b.textContent = "选择";
+      b.onclick = () => withBusy(() => pickVid(v));
+      row.appendChild(b); box.appendChild(row);
+    });
+  }
+  function pickVid(v) {
+    vidSel = v;
+    $("vid-cfg").style.display = "";
+    $("vid-sel").textContent = v.name + " · " + bytes(v.size);
+    $("vid-prog").textContent = "";
   }
 
   /* ------------------ 分辨率调整 ------------------ */
@@ -928,6 +1151,31 @@
       return;
     }
     await browse("/sdcard/Download");
+  });
+  $("btn-vid").onclick = () => withBusy(async () => {
+    const card = $("vid-card");
+    if (card.style.display !== "none") { card.style.display = "none"; return; }
+    await openVid();
+  });
+  $("vid-loop").addEventListener("click", e => {
+    const b = e.target.closest("button[data-v]");
+    if (!b) return;
+    vidLoop = b.dataset.v;
+    document.querySelectorAll("#vid-loop button").forEach(x =>
+      x.setAttribute("aria-pressed", x.dataset.v === vidLoop ? "true" : "false"));
+  });
+  $("btn-vid-go").onclick = () => withBusy(async () => {
+    if (!vidSel) { toast("先选一个视频", "err"); return; }
+    vidFps = Math.max(1, Math.min(60, parseInt($("vid-fps").value, 10) || 30));
+    const bytes = await readDeviceBytes(vidSel.path, (d, t) => {
+      $("vid-prog").textContent = `读取视频 ${Math.round((d / t) * 100)}%`;
+    });
+    if (bytes.length > 150 * 1024 * 1024) { toast("视频太大（>150MB），先剪短再转", "err"); return; }
+    const res = await convertVideo(bytes, vidSel.name.split(".").pop().toLowerCase(), (txt, pct) => {
+      $("vid-prog").textContent = txt + (pct != null ? `（${pct}%）` : "");
+    });
+    toast(`转换完成：${res.frames} 帧 ${res.fps}fps，已导入 ${res.stored}${res.audio ? "（含音频）" : ""}，重启生效`, "ok");
+    await refresh();
   });
 
   // 跟随系统时：系统切换深/浅色后同步（重新打开界面或系统主题变化时）

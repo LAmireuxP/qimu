@@ -777,7 +777,12 @@ cmd_ls() {
     if [ -d "$p" ]; then
       printf 'D\t%s\t%s\n' "$x" "$p"
     elif [ -f "$p" ]; then
-      case "$x" in *.zip|*.ZIP) printf 'F\t%s\t%s\t%s\n' "$x" "$(file_size "$p")" "$p" ;; esac
+      case "$x" in
+        *.zip|*.ZIP) printf 'F\t%s\t%s\t%s\n' "$x" "$(file_size "$p")" "$p" ;;
+        # 视频文件单列一类（V），给「视频转动画」用；选择文件列表里不显示导入按钮
+        *.mp4|*.MP4|*.mov|*.MOV|*.mkv|*.MKV|*.webm|*.WEBM|*.m4v|*.M4V|*.3gp|*.3GP)
+          printf 'V\t%s\t%s\t%s\n' "$x" "$(file_size "$p")" "$p" ;;
+      esac
     fi
   done
 }
