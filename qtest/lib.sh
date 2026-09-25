@@ -810,25 +810,3 @@ cmd_order() {
   fi
 }
 
-case "$1" in
-  list) cmd_list ;;
-  status) cmd_status ;;
-  info) cmd_info ;;
-  select) cmd_select "$2" ;;
-  fit) cmd_fit "$2" ;;
-  desc) cmd_desc "$2" ;;
-  setres) cmd_setres "$2" "$3" "$4" ;;
-  swap) cmd_swap "$2" ;;
-  audio) cmd_audio "$2" ;;
-  audioout) cmd_audioout "$2" ;;
-  import) cmd_import "$2" ;;
-  delete) cmd_delete "$2" ;;
-  scan) cmd_scan ;;
-  ls) cmd_ls "$2" ;;
-  reset) cmd_reset ;;
-  order) shift; cmd_order "$@" ;;
-  guard) install_guard && echo "OK guard installed" ;;
-  unguard) remove_guard && echo "OK guard removed" ;;
-  deploy) deploy_active && echo "OK deployed" ;;
-  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|import PATH|delete N|scan|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
-esac

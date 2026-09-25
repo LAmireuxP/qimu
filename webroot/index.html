@@ -173,7 +173,7 @@
 </div>
 
 <div class="card" id="res-card" style="display:none">
-  <h2>调整分辨率 · <span id="res-name"></span></h2>
+  <h2>动画工具 · <span id="res-name"></span></h2>
   <div class="path" id="res-info"></div>
   <div class="hint" id="res-hint">改的是库里这份副本的 desc.txt；正在使用的动画改完会自动重新刷入。</div>
   <div class="toolbar" style="margin-top:10px;margin-bottom:0">
@@ -187,6 +187,11 @@
     <span class="sep">×</span>
     <input id="res-h" class="num" type="number" inputmode="numeric" placeholder="高">
     <button class="btn" id="btn-res-set">应用</button>
+  </div>
+  <div class="row" style="margin-top:10px;align-items:center">
+    <div class="info"><div class="nm" style="font-size:13px;font-weight:600">包内音频</div>
+      <div class="dt" id="res-audio" style="margin-top:1px;word-break:break-all">…</div></div>
+    <button class="btn ghost" id="btn-res-audio" disabled>导出到下载</button>
   </div>
   <div class="toolbar" style="margin-top:10px;margin-bottom:0">
     <button class="btn ghost" id="btn-res-close" style="flex:1">关闭</button>
@@ -669,7 +674,11 @@
       btn.disabled = ok !== "yes";
       btn.onclick = () => withBusy(async () => {
         const r = await ctl("import", path);
-        if (/OK /.test(r)) { toast("已导入 " + (r.slice(r.indexOf("=") + 1) || ""), "ok"); await scan(); await refresh(); }
+        if (/OK /.test(r)) {
+          const m = /stored=(\S+)/.exec(r), am = /audio=(\d+)/.exec(r);
+          toast("已导入 " + (m ? m[1] : "") + (am ? "（含 " + am[1] + " 个音频）" : ""), "ok");
+          await scan(); await refresh();
+        }
         else toast(friendly(r), "err");
       });
       row.appendChild(btn);
@@ -736,7 +745,11 @@
         b.className = "btn"; b.textContent = "导入";
         b.onclick = () => withBusy(async () => {
           const r = await ctl("import", p[3]);
-          if (/OK /.test(r)) { toast("已导入 " + (r.slice(r.indexOf("=") + 1) || ""), "ok"); await refresh(); }
+          if (/OK /.test(r)) {
+            const m = /stored=(\S+)/.exec(r), am = /audio=(\d+)/.exec(r);
+            toast("已导入 " + (m ? m[1] : "") + (am ? "（含 " + am[1] + " 个音频）" : ""), "ok");
+            await refresh();
+          }
           else toast(friendly(r), "err");
         });
         row.appendChild(b);
@@ -755,6 +768,8 @@
     $("res-name").textContent = name;
     $("res-info").textContent = "读取中…";
     $("res-w").value = ""; $("res-h").value = "";
+    $("res-audio").textContent = "…";
+    $("btn-res-audio").disabled = true;
     const out = String(await ctl("desc", idx));
     if (/^\s*ERROR/.test(out)) { $("res-info").textContent = friendly(out); return; }
     const p = {};
@@ -768,6 +783,21 @@
     $("res-info").textContent = info;
     $("res-w").value = p.desc_w || "";
     $("res-h").value = p.desc_h || "";
+    // 包内音频（旧导入的包会现场补提取）
+    try {
+      const a = String(await ctl("audio", idx));
+      if (/^\s*ERROR/.test(a)) { $("res-audio").textContent = friendly(a); return; }
+      const ap = {};
+      a.split("\n").forEach(l => { const i = l.indexOf("="); if (i > 0) ap[l.slice(0, i)] = l.slice(i + 1); });
+      const n = parseInt(ap.audio_n, 10) || 0;
+      if (n > 0) {
+        const files = a.split("\n").filter(l => l.startsWith("FILE=")).map(l => l.slice(5)).join("、");
+        $("res-audio").textContent = "♪ " + n + " 个：" + files;
+        $("btn-res-audio").disabled = false;
+      } else {
+        $("res-audio").textContent = "这个包里没有音频";
+      }
+    } catch (_) { $("res-audio").textContent = "读取失败"; }
   }
 
   // fit/swap/setres 的 OK 行自带 to=宽x高 —— 直接拿来更新面板，省一次 desc 往返；
@@ -821,6 +851,17 @@
     if (/OK /.test(r)) {
       if (!applyResFromOk(r)) await openRes(resCtx.idx, resCtx.name);
       toast("已设为 " + w + "×" + h, "ok"); await refresh();
+    }
+    else toast(friendly(r), "err");
+  });
+
+  // 导出包内音频到下载目录
+  $("btn-res-audio").onclick = () => withBusy(async () => {
+    if (!resCtx) return;
+    const r = await ctl("audioout", resCtx.idx);
+    if (/OK /.test(r)) {
+      const m = / to=(\S+)/.exec(r);
+      toast("音频已导出到 " + (m ? m[1] : "下载目录"), "ok");
     }
     else toast(friendly(r), "err");
   });
