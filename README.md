@@ -27,6 +27,8 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 
 `tools/pad_convert.py` 可以把随便一个 AOSP 格式的动画转成能用的：帧按 cover 方式缩放裁切到目标分辨率（满屏无黑边、无损 PNG）、desc 首行改成目标分辨率、强制不压缩。用之前 `pip install pillow`，目标尺寸跟在名字后面传，如 `python tools/pad_convert.py 源.zip 目标.zip 名字 1080x2400`。
 
+`tools/mp4_convert.py` 更进一步，直接把 MP4 等视频转成开机动画包：按帧率抽帧、cover 缩放裁切到目标分辨率、整段循环或播一遍可选，视频里的音轨还会提取成 `sound/poweron.mp3` 一起放进包里（导入时启幕会自动解出来留档）。用之前 `pip install imageio-ffmpeg pillow`（自带静态 ffmpeg，不用手动装），如 `python tools/mp4_convert.py 视频.mp4 动画包.zip`。转换在电脑上做——手机端没有任何视频解码工具，导入转换好的 zip 走正常的「扫描目录 / 选择文件」流程就行。
+
 ## 导入哪种包
 
 网上下的「开机动画」常见两种，启幕都能吃：
