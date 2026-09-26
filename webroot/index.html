@@ -953,7 +953,7 @@
         ctx.fillStyle = "#000"; ctx.fillRect(0, 0, screenW, screenH);
         ctx.drawImage(v, (screenW - vw * s) / 2, (screenH - vh * s) / 2, vw * s, vh * s);
       };
-      const grab = () => { drawNow(); return { name: `part0/${String(parts.length).padStart(5, "0")}.jpg`, data: canvasJpegBytes(cv, vidQuality) }; };
+      const grab = (k) => { drawNow(); return { name: `part0/${String(k).padStart(5, "0")}.jpg`, data: canvasJpegBytes(cv, vidQuality) }; };
       // 视频放进卡片里可见地播放——一来用户能看到转换的是哪个视频，
       // 二来可见渲染中的视频不会被 Chromium 当「后台媒体」省电暂停（缩成小透明块就会被暂停）
       v.setAttribute("playsinline", "");
@@ -976,7 +976,7 @@
             lastAct = Date.now();
             const t = meta.mediaTime;
             while (i < n && t >= (i + 0.5) * iv) {
-              fr.push(grab());
+              fr.push(grab(i + 1));
               i++;
               onProg(`抽帧 ${i}/${n}`, 5 + Math.round((i / n) * 60));
             }
@@ -997,10 +997,11 @@
         for (let i = 0; i < n; i++) {                     // 老内核无 rVFC 或播放被拒：回退 seek 逐帧
           await seekP(v, Math.min((i + 0.5) * dur / n, Math.max(0, dur - 0.05)));
           drawNow();
-          parts.push(grab());
+          parts.push(grab(i + 1));
           onProg(`抽帧 ${i + 1}/${n}`, 5 + Math.round(((i + 1) / n) * 60));
         }
       }
+      if (extracted) parts.push(...extracted);            // rVFC 播出来的帧并回打包清单（漏了这句就会打出零帧的包）
       stopPrev();
       try {                                               // 音轨 → WAV 留档（最多 30s）
         onProg("提取音轨…", 70);
@@ -1013,6 +1014,8 @@
         }
       } catch (_) { /* 没音轨或解不了就跳过 */ }
 
+      const frameCount = parts.filter(p => p.name.indexOf("part0/") === 0).length;
+      if (!frameCount) throw new Error("没有抽到画面帧，已中止：视频可能解码异常，换个 MP4 再试");
       onProg("打包 zip…", 78);
       const zip = buildZip(parts);
       // 临时包名带上视频名——import 用文件名当动画名，别让用户看到一串临时数字
@@ -1026,7 +1029,7 @@
       const r = await ctl("import", tmp);
       await run(`rm -f ${quote(tmp)}`);
       if (!/OK /.test(r)) throw new Error(friendly(r));
-      return { stored: (/stored=(\S+)/.exec(r) || [])[1] || "", audio: +((/audio=(\d+)/.exec(r) || [])[1] || 0), frames: n, fps: fpsEff };
+      return { stored: (/stored=(\S+)/.exec(r) || [])[1] || "", audio: +((/audio=(\d+)/.exec(r) || [])[1] || 0), frames: frameCount, fps: fpsEff };
     } finally {
       URL.revokeObjectURL(url);
     }
