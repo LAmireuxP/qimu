@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # 开机动画管理器 - 控制脚本
-# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|scan|ls DIR|reset|order NAME...|audio N|audioout N|guard|unguard|deploy}
+# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|ls DIR|reset|order NAME...|audio N|audioout N|guard|unguard|deploy}
 #
 # 几处踩过坑的地方，改的时候注意：
 #   - 动画库列表每次运行只枚举一次，order.txt 一次读进来用纯 shell 比较，
@@ -19,7 +19,6 @@ SELECTED_FILE="$STATE_DIR/selected.txt"
 THEME_DIR="/data/system/theme/boots"
 THEME_FILE="$THEME_DIR/bootanimation.zip"
 STAMP_FILE="$STATE_DIR/deployed.stamp"
-SCAN_DIRS="/sdcard/Download /storage/emulated/0/Download /sdcard/CustomBoot /sdcard /data/local/tmp"
 NO_ANIM_NAME="不播放动画"
 ORDER_FILE="$STATE_DIR/order.txt"
 # 手动分辨率名单：在界面/命令里 setres、swap 设过的动画记在这里，
@@ -324,7 +323,11 @@ entry_paths() {
 entry_count() {
   load_entries
   [ -n "$ENTRIES" ] || { echo 0; return 0; }
-  printf '%s\n' "$ENTRIES" | grep -c . 2>/dev/null || echo 0
+  ec_n=0
+  while IFS= read -r ec_l; do ec_n=$((ec_n + 1)); done <<EC_IN
+$ENTRIES
+EC_IN
+  echo "$ec_n"
 }
 
 entry_at() {
@@ -439,7 +442,9 @@ deploy_active() {
   # md5 确认后跳过；desc 改写过就无论如何重拷，保证手动设的分辨率真落到生效文件上
   if [ -z "$FIT_WROTE" ] && [ -f "$THEME_FILE" ] && [ "$(file_size "$THEME_FILE")" = "$new_size" ]; then
     if command -v md5sum >/dev/null 2>&1; then
-      if [ "$(md5sum "$THEME_FILE" 2>/dev/null | awk '{print $1}')" = "$(md5sum "$ap" 2>/dev/null | awk '{print $1}')" ]; then
+      set -- $(md5sum "$THEME_FILE" 2>/dev/null); m1=$1
+      set -- $(md5sum "$ap" 2>/dev/null); m2=$1
+      if [ "$m1" = "$m2" ] && [ -n "$m1" ]; then
         printf '%s\n' "$stamp_val" >"$STAMP_FILE" 2>/dev/null
         log "theme already current (md5)"
         return 0
@@ -776,18 +781,6 @@ cmd_delete() {
   echo "OK deleted=$n"
 }
 
-cmd_scan() {
-  for d in $SCAN_DIRS; do
-    [ -d "$d" ] || continue
-    for f in "$d"/*.zip "$d"/*.ZIP; do
-      [ -f "$f" ] || continue
-      ok=no
-      validate_zip "$f" >/dev/null 2>&1 && ok=yes
-      printf '%s\t%s\t%s\n' "$f" "$(file_size "$f")" "$ok"
-    done
-  done
-}
-
 # 列目录，给界面里「选择文件」用（用户可以自己翻到动画放的位置）
 # 用法: ctl.sh ls [目录]
 # 输出: D<tab>名字<tab>路径         子目录
@@ -859,12 +852,11 @@ case "$1" in
   audioout) cmd_audioout "$2" ;;
   import) cmd_import "$2" ;;
   delete) cmd_delete "$2" ;;
-  scan) cmd_scan ;;
   ls) cmd_ls "$2" ;;
   reset) cmd_reset ;;
   order) shift; cmd_order "$@" ;;
   guard) install_guard && echo "OK guard installed" ;;
   unguard) remove_guard && echo "OK guard removed" ;;
   deploy) deploy_active && echo "OK deployed" ;;
-  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|import PATH|delete N|scan|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
+  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|import PATH|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
 esac

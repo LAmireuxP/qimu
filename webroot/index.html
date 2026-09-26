@@ -159,17 +159,8 @@
 
 <div class="toolbar">
   <button class="btn ghost" id="btn-refresh">刷新</button>
-  <button class="btn ghost" id="btn-scan">扫描目录</button>
   <button class="btn ghost" id="btn-browse">选择文件</button>
   <button class="btn ghost" id="btn-vid">视频转换</button>
-</div>
-
-<div class="card" id="scan-card" style="display:none">
-  <h2>可导入的动画</h2>
-  <div id="scan-list"></div>
-  <div class="hint">把 zip 丢进「下载」目录，点扫描就能导进来。<br>
-    要求：根目录有 desc.txt，而且不能压缩（ZIP_STORED）——压缩过的 bootanimation 不认。<br>
-    再点一次「扫描目录」可收起。</div>
 </div>
 
 <div class="card" id="browse-card" style="display:none">
@@ -704,43 +695,6 @@
     syncOrderButtons();
   }
 
-  async function scan() {
-    const out = await ctl("scan");
-    const rows = String(out).split(/\r?\n/).filter(l => l.trim());
-    const card = $("scan-card"), box = $("scan-list");
-    card.style.display = "";
-    $("btn-scan").textContent = "收起列表";
-    if (!rows.length) { box.innerHTML = '<div class="empty">没有找到可导入的 zip 文件</div>'; return; }
-    box.innerHTML = "";
-    rows.forEach(line => {
-      const [path, size, ok] = line.split("\t");
-      const row = document.createElement("div");
-      row.className = "row";
-      const left = document.createElement("div");
-      left.className = "info";
-      const nmEl = document.createElement("div"); nmEl.className = "nm"; nmEl.textContent = path;
-      const dtEl = document.createElement("div"); dtEl.className = "dt";
-      dtEl.textContent = bytes(size) + (ok === "yes" ? "" : " · 格式不合格（需 STORED 无压缩）");
-      left.appendChild(nmEl); left.appendChild(dtEl);
-      row.appendChild(left);
-      const btn = document.createElement("button");
-      btn.className = "btn";
-      btn.textContent = "导入";
-      btn.disabled = ok !== "yes";
-      btn.onclick = () => withBusy(async () => {
-        const r = await ctl("import", path);
-        if (/OK /.test(r)) {
-          const m = /stored=(\S+)/.exec(r), am = /audio=(\d+)/.exec(r);
-          toast("已导入 " + (m ? m[1] : "") + (am ? "（含 " + am[1] + " 个音频）" : ""), "ok");
-          await scan(); await refresh();
-        }
-        else toast(friendly(r), "err");
-      });
-      row.appendChild(btn);
-      box.appendChild(row);
-    });
-  }
-
   /* ------------------ 自己选文件 ------------------ */
   let browsePath = "/sdcard";
 
@@ -1083,7 +1037,7 @@
     $("vid-cfg").style.display = "none";
     $("vid-prog").textContent = "";
     if (vidBrowse) return vidBrowseDir(vidBrowse);      // 上次浏览到哪就回到哪
-    const box = $("vid-list"); box.innerHTML = '<div class="empty">扫描视频…</div>';
+    const box = $("vid-list"); box.innerHTML = '<div class="empty">查找视频…</div>';
     const vids = [];
     for (const dir of ["/sdcard/Download", "/sdcard/Movies"]) {
       const out = String(await ctl("ls", dir)).replace(/\r\n/g, "\n");
@@ -1302,16 +1256,7 @@
     if (b) setThemeMode(b.dataset.mode);
   });
   $("btn-refresh").onclick = () => withBusy(refresh);
-  // 「扫描目录」「选择文件」都是开关：再点一次收起列表，收起后再点重新扫描/从头开始
-  $("btn-scan").onclick = () => withBusy(async () => {
-    const card = $("scan-card");
-    if (card.style.display !== "none") {
-      card.style.display = "none";
-      $("btn-scan").textContent = "扫描目录";
-      return;
-    }
-    await scan();
-  });
+  // 「选择文件」是开关：再点一次收起列表，收起后再点从「下载」目录重新开始
   $("btn-browse").onclick = () => withBusy(async () => {
     const card = $("browse-card");
     if (card.style.display !== "none") {
