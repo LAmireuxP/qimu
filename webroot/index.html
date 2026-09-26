@@ -942,7 +942,7 @@
     return u8;
   }
 
-  async function convertVideo(bytes, ext, onProg) {
+  async function convertVideo(bytes, ext, zipName, onProg) {
     const url = URL.createObjectURL(new Blob([bytes], { type: VID_MIME[ext] || "video/mp4" }));
     const v = document.createElement("video");
     v.muted = true; v.preload = "auto"; v.src = url;
@@ -984,7 +984,8 @@
 
       onProg("打包 zip…", 78);
       const zip = buildZip(parts);
-      const tmp = `/data/local/tmp/qimu_v2b_${Date.now()}.zip`;
+      // 临时包名带上视频名——import 用文件名当动画名，别让用户看到一串临时数字
+      const tmp = `/data/local/tmp/${zipName}`;
       let lastP = 0;
       await writeDeviceBytes(tmp, zip, (d, t) => {
         const p = 80 + Math.round((d / t) * 18);
@@ -1239,7 +1240,8 @@
       $("vid-prog").textContent = `读取视频 ${Math.round((d / t) * 100)}%`;
     });
     if (bytes.length > 150 * 1024 * 1024) { toast("视频太大（>150MB），先剪短再转", "err"); return; }
-    const res = await convertVideo(bytes, vidSel.name.split(".").pop().toLowerCase(), (txt, pct) => {
+    const res = await convertVideo(bytes, vidSel.name.split(".").pop().toLowerCase(),
+      (vidSel.name.replace(/\.[^.]+$/, "") || "视频转动画") + ".zip", (txt, pct) => {
       $("vid-prog").textContent = txt + (pct != null ? `（${pct}%）` : "");
     });
     toast(`转换完成：${res.frames} 帧 ${res.fps}fps，已导入 ${res.stored}${res.audio ? "（含音频）" : ""}，重启生效`, "ok");
