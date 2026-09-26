@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # 开机动画管理器 - 控制脚本
-# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|import PATH|delete N|scan|ls DIR|reset|order NAME...|audio N|audioout N|guard|unguard|deploy}
+# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|scan|ls DIR|reset|order NAME...|audio N|audioout N|guard|unguard|deploy}
 #
 # 几处踩过坑的地方，改的时候注意：
 #   - 动画库列表每次运行只枚举一次，order.txt 一次读进来用纯 shell 比较，
@@ -657,6 +657,36 @@ cmd_audioout() {
 }
 
 # 交换某动画 desc 的宽高（一键修正长宽互换）。宽高位数相同，串长不变，必能写入。
+cmd_rename() {
+  idx="$1"; newn="$2"
+  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: rename N 新名字"; return 1;; esac
+  [ -n "$newn" ] || { echo "ERROR 名字不能为空"; return 1; }
+  p=$(entry_at "$idx")
+  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
+  oldn=$(name_of "$p")
+  newn=$(sanitize_name "$newn")
+  [ -n "$newn" ] || { echo "ERROR 名字无效"; return 1; }
+  [ "$newn" = "$oldn" ] && { echo "OK renamed=$newn"; return 0; }
+  target="$LIB_DIR/$newn.zip"
+  [ -e "$target" ] && { echo "ERROR 已有同名动画"; return 1; }
+  was_active=no
+  [ "$oldn" = "$(active_name)" ] && was_active=yes
+  mv -f "$p" "$target" 2>/dev/null || { echo "ERROR 改名失败"; return 1; }
+  chmod 0644 "$target" 2>/dev/null
+  # 音频留档、手动分辨率名单跟着改名
+  [ -d "$AUDIO_DIR/$oldn" ] && mv -f "$AUDIO_DIR/$oldn" "$AUDIO_DIR/$newn" 2>/dev/null
+  if manual_has "$oldn"; then manual_del "$oldn"; manual_add "$newn"; fi
+  # 生效中的动画改名 → 选择记录同步改，再重新部署（stamp 里记的名字也一并更新）
+  if [ "$was_active" = "yes" ]; then
+    printf '%s\n' "$newn" > "$SELECTED_FILE" 2>/dev/null
+    deploy_active >/dev/null 2>&1
+  fi
+  log "renamed: $oldn -> $newn"
+  echo "OK renamed=$newn"
+  return 0
+}
+
+# 交换某动画 desc 的宽高（一键修正长宽互换）。宽高位数相同，串长不变，必能写入。
 cmd_swap() {
   idx="$1"
   case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: swap N"; return 1;; esac
@@ -824,6 +854,7 @@ case "$1" in
   desc) cmd_desc "$2" ;;
   setres) cmd_setres "$2" "$3" "$4" ;;
   swap) cmd_swap "$2" ;;
+  rename) cmd_rename "$2" "$3" ;;
   audio) cmd_audio "$2" ;;
   audioout) cmd_audioout "$2" ;;
   import) cmd_import "$2" ;;

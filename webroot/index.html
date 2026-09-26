@@ -106,6 +106,13 @@
         text-align:center;-webkit-appearance:none;appearance:none}
   input.num:focus{outline:none;border-color:var(--accent)}
   .sep{color:var(--sub);font-size:13px;flex:0 0 auto}
+  .name-input{flex:1;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:9px;
+        background:var(--card2);color:var(--fg);font-size:14px;font-family:inherit}
+  .name-input:focus{outline:none;border-color:var(--accent)}
+  /* 编辑弹窗：遮罩 + 居中卡片 */
+  #res-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:8;display:none}
+  #res-card{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(92vw,430px);
+        max-height:88vh;overflow-y:auto;z-index:9;display:none;margin:0}
   #toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%) translateY(20px);
          background:var(--toast-bg);border:1px solid var(--line);color:var(--fg);padding:11px 17px;
          border-radius:11px;font-size:13.5px;max-width:86%;opacity:0;pointer-events:none;
@@ -173,8 +180,13 @@
     换目录用第一行的「⬆ 上一级」；再点一次「选择文件」收起，收起后再点从「下载」目录重新开始。</div>
 </div>
 
+<div id="res-mask"></div>
 <div class="card" id="res-card" style="display:none">
-  <h2>动画工具 · <span id="res-name"></span></h2>
+  <h2>编辑动画 · <span id="res-name"></span></h2>
+  <div class="row" style="margin-bottom:10px;align-items:center">
+    <input id="res-name-in" class="name-input" type="text" maxlength="60" placeholder="动画名称">
+    <button class="btn ghost" id="btn-res-rename" style="flex:0 0 auto">改名</button>
+  </div>
   <div class="path" id="res-info"></div>
   <div class="hint" id="res-hint">改的是库里这份副本的 desc.txt；正在使用的动画改完会自动重新刷入。</div>
   <div class="toolbar" style="margin-top:10px;margin-bottom:0">
@@ -653,10 +665,10 @@
       });
       row.appendChild(apply);
 
-      // 分辨率调整：自适应屏幕 / 交换宽高 / 自定义宽高
+      // 编辑弹窗：分辨率（自适应/交换/自定义）+ 改名 + 包内音频
       const res = document.createElement("button");
       res.className = "btn ghost";
-      res.textContent = "分辨率";
+      res.textContent = "编辑";
       res.style.padding = "7px 8px";
       res.onclick = () => withBusy(() => openRes(row.dataset.idx, name));
       row.appendChild(res);
@@ -1121,8 +1133,10 @@
 
   async function openRes(idx, name) {
     resCtx = { idx: String(idx), name };
-    $("res-card").style.display = "";
+    $("res-mask").style.display = "block";
+    $("res-card").style.display = "block";
     $("res-name").textContent = name;
+    $("res-name-in").value = name;
     $("res-info").textContent = "读取中…";
     $("res-w").value = ""; $("res-h").value = "";
     $("res-audio").textContent = "…";
@@ -1170,9 +1184,30 @@
     return true;
   }
 
-  function closeRes() { $("res-card").style.display = "none"; resCtx = null; }
+  function closeRes() { $("res-mask").style.display = "none"; $("res-card").style.display = "none"; resCtx = null; }
 
   $("btn-res-close").onclick = closeRes;
+  $("res-mask").onclick = closeRes;               // 点遮罩也能关
+
+  // 改名：库文件、音频留档、手动名单、生效记录一起联动（shell 端 rename 命令处理）
+  $("btn-res-rename").onclick = () => withBusy(async () => {
+    if (!resCtx) return;
+    const nn = ($("res-name-in").value || "").trim();
+    if (!nn) { toast("名字不能为空", "err"); return; }
+    if (nn.length > 60) { toast("名字最长 60 个字", "err"); return; }
+    const r = await ctl("rename", resCtx.idx, nn);
+    if (/OK /.test(r)) {
+      resCtx.name = nn;
+      $("res-name").textContent = nn;
+      $("res-name-in").value = nn;
+      toast("已改名为 " + nn, "ok");
+      await refresh();
+      // 改名后列表按名字重排，编号会变——按新名字把当前编辑对象重新对上
+      const row = Array.from(document.querySelectorAll("#library .row")).find(x => x.dataset.name === nn);
+      if (row) resCtx.idx = row.dataset.idx;
+    } else toast(friendly(r), "err");
+  });
+  $("res-name-in").addEventListener("keydown", e => { if (e.key === "Enter") $("btn-res-rename").click(); });
 
   // 自适应屏幕：交给 ctl.sh fit，方向感知后会保留源动画方向、避免长宽互换
   $("btn-res-fit").onclick = () => withBusy(async () => {
