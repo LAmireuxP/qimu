@@ -924,14 +924,23 @@
     return new Uint8Array(dv.buffer);
   }
 
-  const toBlobP = (cv, type, q) => new Promise((res, rej) => cv.toBlob(b => b ? res(b) : rej(new Error("帧编码失败")), type, q));
   const seekP = (v, t) => new Promise(res => {
     let done = false;
-    const fin = () => { if (!done) { done = true; setTimeout(res, 30); } };
+    const fin = () => { if (!done) { done = true; res(); } };
     v.addEventListener("seeked", fin, { once: true });
     v.currentTime = t;
     setTimeout(fin, 2000);                              // 个别内核 seek 不派发事件，兜底
   });
+  // 帧出图用同步 toDataURL（软件画布 + 同步编码），不依赖合成器出帧——
+  // 之前用异步 toBlob，页面静止时 WebView 不出渲染帧，回调一直挂着，
+  // 用户实测「滑动屏幕抽帧就变快」，就是这个原因
+  function canvasJpegBytes(cv) {
+    const du = cv.toDataURL("image/jpeg", 0.92);
+    const bin = atob(du.slice(du.indexOf(",") + 1));
+    const u8 = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    return u8;
+  }
 
   async function convertVideo(bytes, ext, onProg) {
     const url = URL.createObjectURL(new Blob([bytes], { type: VID_MIME[ext] || "video/mp4" }));
@@ -951,15 +960,15 @@
       onProg(`视频 ${vw}×${vh} ${dur.toFixed(1)}s → ${n} 帧 ${fpsEff}fps${loop ? "（循环）" : "（播一遍）"}`, 5);
 
       const cv = document.createElement("canvas"); cv.width = screenW; cv.height = screenH;
-      const ctx = cv.getContext("2d");
+      // willReadFrequently：软件画布，读写像素走内存，不依赖合成器出帧
+      const ctx = cv.getContext("2d", { willReadFrequently: true });
       const parts = [{ name: "desc.txt", data: new TextEncoder().encode(`${screenW} ${screenH} ${fpsEff}\np ${loop ? 0 : 1} 0 part0\n`) }];
       for (let i = 0; i < n; i++) {
         await seekP(v, Math.min((i + 0.5) * dur / n, Math.max(0, dur - 0.05)));
         const s = Math.max(screenW / vw, screenH / vh);   // cover：满屏无黑边
         ctx.fillStyle = "#000"; ctx.fillRect(0, 0, screenW, screenH);
         ctx.drawImage(v, (screenW - vw * s) / 2, (screenH - vh * s) / 2, vw * s, vh * s);
-        const b = await toBlobP(cv, "image/jpeg", 0.92);
-        parts.push({ name: `part0/${String(i + 1).padStart(5, "0")}.jpg`, data: new Uint8Array(await b.arrayBuffer()) });
+        parts.push({ name: `part0/${String(i + 1).padStart(5, "0")}.jpg`, data: canvasJpegBytes(cv) });
         onProg(`抽帧 ${i + 1}/${n}`, 5 + Math.round(((i + 1) / n) * 60));
       }
       try {                                               // 音轨 → WAV 留档（最多 30s）
