@@ -1,6 +1,6 @@
 # 启幕
 
-HyperOS 的开机动画管理器，KernelSU / SukiSU / APatch / Magisk 都能用。中文界面，换动画、导入动画、删动画、把视频转成开机动画、调分辨率，或者干脆不显示动画。
+HyperOS 的开机动画管理器，KernelSU / SukiSU / APatch / Magisk 都能用。中文界面，换动画、导入动画、删动画、把视频转成开机动画、改名字、调分辨率，或者干脆不显示动画。
 
 HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` 这一条，比 `/system/media`、`/product/media` 都靠前，所以这个模块直接往这条路径写，不用动系统分区。关掉模块或者卸载之后，下次开机会自动回到出厂的动画。
 
@@ -11,7 +11,8 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 - 调顺序：按住每行左边的 ⠿ 上下拖，或者用 ▲▼ 一格一格移，松手就存
 - 不要动画：选「不播放动画」，开机黑屏直接进系统
 - 视频转动画：手机里的视频（MP4/MOV/MKV/WEBM）直接转成开机动画并导入，全程手机本地完成，不用电脑
-- 分辨率自动适配：刷入时自动改到你屏幕的尺寸，不会黑边也不会被裁掉；方向画反也能自动纠正，界面里还能手动调
+- 编辑动画：每个动画的「编辑」弹窗里，可以改名字、调分辨率（自适应屏幕、交换宽高或自己填）、导出包里夹带的音频
+- 分辨率自动适配：刷入时自动改到你屏幕的尺寸，不会黑边也不会被裁掉；方向画反也能自动纠正；手动调过的动画刷入时按你设的来
 - 界面跟随系统深浅色，也可以手动固定成浅色或深色
 
 ## 安装
@@ -25,7 +26,8 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 1. 进界面，点某个动画的「应用」，重启
 2. 加自己的动画：zip 得是 **ZIP_STORED 不压缩**、根目录有 `desc.txt`，点「选择文件」自己翻到它所在的位置导入。格式不对界面会告诉你原因
 3. 想用视频当开机动画：点「视频转换」，选手机里的视频（下载/影片目录，或自己翻目录）一键转换导入，不用电脑
-4. 正在用哪个动画，界面里有「使用中」标记
+4. 改名字、调分辨率或导出音频：点动画的「编辑」，都在弹窗里；正在用的动画改完会自动重新刷入
+5. 正在用哪个动画，界面里有「使用中」标记
 
 `tools/pad_convert.py` 可以把随便一个 AOSP 格式的动画转成能用的：帧按 cover 方式缩放裁切到目标分辨率（满屏无黑边、无损 PNG）、desc 首行改成目标分辨率、强制不压缩。用之前 `pip install pillow`，目标尺寸跟在名字后面传，如 `python tools/pad_convert.py 源.zip 目标.zip 名字 1080x2400`。
 
@@ -78,6 +80,6 @@ adb shell su -c "strings /system/lib64/libbootanimation_preapex.so | grep theme/
 
 界面「当前动画」那栏会显示这个动画的来源文件路径、刷入位置和你的屏幕分辨率，能看清「文件在哪、刷到哪」。
 
-动画都放在 `/data/adb/bootanims/`，生效文件是 `/data/system/theme/boots/bootanimation.zip`。想用命令行操作的话，`bin/ctl.sh` 有这些子命令：`list / status / info / select / fit / desc / setres / swap / import / delete / scan / ls / reset / order / deploy`。
+动画都放在 `/data/adb/bootanims/`，生效文件是 `/data/system/theme/boots/bootanimation.zip`。想用命令行操作的话，`bin/ctl.sh` 有这些子命令：`list / status / info / select / fit / desc / setres / swap / rename / import / delete / ls / reset / order / audio / audioout / guard / unguard / deploy`。
 
 协议 MIT。仓库里没有商业 IP 的动画：内置的 LineageOS 那个是从 LineageOS 开源项目拿的，只当个默认例子，版权还是人家的；「不播放动画」是一帧纯黑。
