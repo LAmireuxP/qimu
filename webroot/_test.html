@@ -5,6 +5,102 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>开机动画管理器</title>
 <script>
+window.__written = {}; window.__calls = 0; window.__vidbuf = null;
+if (location.search.indexOf('norfvc=1') >= 0) { delete HTMLVideoElement.prototype.requestVideoFrameCallback; }
+async function mockVideoBytes() {
+  if (!window.__vidbuf) {
+    const r = await fetch('/webroot/vid_test.mp4');
+    window.__vidbuf = new Uint8Array(await r.arrayBuffer());
+  }
+  return window.__vidbuf;
+}
+async function mockExec(cmd){
+  window.__calls++;
+  if (cmd.indexOf("'info'") >= 0)
+    return 'active=AudioTest\nactive_path=/data/adb/bootanims/AudioTest.zip\ntheme_path=/data/system/theme/boots/bootanimation.zip\nlibrary=/data/adb/bootanims\nscreen=1080x2400\ncount=2\ntheme_size=99861368\ntheme_ok=yes\nguard_count=2\n##LIST\n1\tAudioTest\t99861368\tyes\t1080×2400 · 30fps ♪\n2\tLineageOS\t13380781\tno\t1440×3120 · 60fps';
+  if (cmd.indexOf("'ls'") >= 0)
+    return 'V\tvid_test.mp4\t' + (await mockVideoBytes()).length + '\t/sdcard/Download/vid_test.mp4';
+  if (cmd.indexOf('wc -c') >= 0) {
+    const m = cmd.match(/< '([^']+)'/);
+    if (window.__written[m[1]]) return String(window.__written[m[1]].reduce((a, u) => a + u.length, 0));
+    if (m[1].indexOf('vid_test') >= 0) return String((await mockVideoBytes()).length);
+    return '0';
+  }
+  if (cmd.indexOf('dd if=') >= 0) {
+    const buf = await mockVideoBytes();
+    const bs = +((cmd.match(/bs=(\d+)/) || [])[1] || 65536);
+    const skip = +((cmd.match(/skip=(\d+)/) || [])[1] || 0);
+    const chunk = buf.subarray(skip * bs, Math.min(skip * bs + bs, buf.length));
+    let s = '';
+    for (let i = 0; i < chunk.length; i += 8192) s += String.fromCharCode.apply(null, chunk.subarray(i, i + 8192));
+    return btoa(s);
+  }
+  var wm = cmd.match(/^echo '([A-Za-z0-9+/=]+)' \| base64 -d >> '([^']+)'/);
+  if (wm) {
+    const bin = atob(wm[1]);
+    const u = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+    if (!window.__written[wm[2]]) window.__written[wm[2]] = [];
+    window.__written[wm[2]].push(u);
+    return '';
+  }
+  if (cmd.indexOf("'import'") >= 0) {
+    const m = cmd.match(/'([^']+)'$/);
+    const parts = window.__written[m[1]];
+    if (!parts) return 'ERROR import: 没找到写回的文件';
+    let total = 0; parts.forEach(u => total += u.length);
+    const z = new Uint8Array(total); let p = 0;
+    parts.forEach(u => { z.set(u, p); p += u.length; });
+    window.__lastZip = z;
+    const dv = new DataView(z.buffer);
+    let e = z.length - 22;
+    while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
+    if (e < 0) return 'ERROR import: EOCD 找不到';
+    const n = dv.getUint16(e + 10, true);
+    let off = dv.getUint32(e + 16, true), bad = 0, nfr = 0;
+    const T = new Uint32Array(256);
+    for (let q = 0; q < 256; q++) { let c = q; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; T[q] = c >>> 0; }
+    function crc(u) { let c = 0xFFFFFFFF; for (let i = 0; i < u.length; i++) c = T[(c ^ u[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+    for (let i = 0; i < n; i++) {
+      const crcSt = dv.getUint32(off + 16, true), csize = dv.getUint32(off + 24, true), nlen = dv.getUint16(off + 28, true);
+      const name = new TextDecoder().decode(z.subarray(off + 46, off + 46 + nlen));
+      const lho = dv.getUint32(off + 42, true);
+      const lnlen = dv.getUint16(lho + 26, true), lelen = dv.getUint16(lho + 28, true);
+      const data = z.subarray(lho + 30 + lnlen + lelen, lho + 30 + lnlen + lelen + csize);
+      if (crc(data) !== crcSt) bad++;
+      if (/^part0\//.test(name)) nfr++;
+      off += 46 + nlen + dv.getUint16(off + 30, true) + dv.getUint16(off + 32, true) + dv.getUint16(off + 34, true);
+    }
+    if (bad) return 'ERROR import: ' + bad + ' 条 CRC 不对';
+    return 'OK stored=vid_test.zip audio=1 frames=' + nfr;
+  }
+  if (cmd.indexOf('cat ') === 0) {
+    const m = cmd.match(/^cat (.+?) > '([^']+)'/);
+    if (m) {
+      const srcs = (m[1].match(/'([^']+)'/g) || []).map(x => x.slice(1, -1));
+      const bufs = srcs.map(f => window.__written[f]).filter(Boolean);
+      let total = 0; bufs.forEach(list => list.forEach(u => total += u.length));
+      const out = new Uint8Array(total); let p = 0;
+      bufs.forEach(list => list.forEach(u => { out.set(u, p); p += u.length; }));
+      window.__written[m[2]] = [out];
+      srcs.forEach(f => { delete window.__written[f]; });
+      return '';
+    }
+  }
+  if (cmd.indexOf("rm -f") >= 0) return '';
+  if (cmd.indexOf('echo qimu-probe') >= 0 || cmd.indexOf('echo probe') >= 0) return 'qimu-probe';
+  if (cmd.indexOf('uimode') >= 0) return 'night mode: no';
+  if (cmd.indexOf('settings get') >= 0) return '1';
+  return '';
+}
+window.ksu = { exec: function(cmd, o, cb){
+  mockExec(cmd).then(out => {
+    if (typeof cb === 'string') { var fn = cb.split('.').pop(); if (window[fn]) window[fn](0, out); }
+    return out;
+  });
+}};
+</script>
+<script>
   // 尽早确定主题，避免闪烁：本地设置 + 缓存的系统状态 + prefers-color-scheme 兜底
   (function () {
     try {
@@ -988,54 +1084,44 @@
         ctx.drawImage(v, (screenW - vw * s) / 2, (screenH - vh * s) / 2, vw * s, vh * s);
       };
       const grab = () => { drawNow(); return { name: `part0/${String(parts.length).padStart(5, "0")}.jpg`, data: canvasJpegBytes(cv, vidQuality) }; };
-      // 视频放进卡片里可见地播放——一来用户能看到转换的是哪个视频，
-      // 二来可见渲染中的视频不会被 Chromium 当「后台媒体」省电暂停（缩成小透明块就会被暂停）
+      // 视频要挂在渲染树里（缩到 2px 近乎不可见）rVFC 才会持续出帧
       v.setAttribute("playsinline", "");
-      const prev = document.createElement("div");
-      prev.style.cssText = "margin:8px 0;background:#000;border-radius:10px;overflow:hidden";
-      v.style.cssText = "display:block;width:100%;pointer-events:none";
-      prev.appendChild(v);
-      $("vid-cfg").insertBefore(prev, $("vid-prog"));
-      const stopPrev = () => { try { v.pause(); } catch (_) {} prev.remove(); };
-      let extracted = null;
+      v.style.cssText = "position:fixed;right:0;bottom:0;width:2px;height:2px;opacity:0.01;pointer-events:none";
+      document.body.appendChild(v);
       if (typeof v.requestVideoFrameCallback === "function") {
         // 播放抽帧：边播边捕帧，不 seek——转换时间≈视频时长；采样点按内容时间轴均匀取
-        extracted = await new Promise((resolve, reject) => {
-          const fr = [];
+        await new Promise((resolve, reject) => {
           let i = 0, lastAct = Date.now();
           const iv = dur / n;
-          const fin = () => { try { v.pause(); } catch (_) {} resolve(fr); };
-          const fail = (m) => { try { v.pause(); } catch (_) {} reject(Object.assign(new Error(m), { skip: true })); };
+          const fin = () => { v.pause(); resolve(); };
+          const fail = (m) => { v.pause(); reject(new Error(m)); };
           const onFrame = (now, meta) => {
             lastAct = Date.now();
             const t = meta.mediaTime;
             while (i < n && t >= (i + 0.5) * iv) {
-              fr.push(grab());
+              parts.push(grab());
               i++;
               onProg(`抽帧 ${i}/${n}`, 5 + Math.round((i / n) * 60));
             }
-            if (i >= n || v.ended) { clearInterval(stall); fin(); } else v.requestVideoFrameCallback(onFrame);
+            if (i >= n || v.ended) fin(); else v.requestVideoFrameCallback(onFrame);
           };
-          const stall = setInterval(() => { if (Date.now() - lastAct > 12000) fin(); }, 2000);   // 解码卡住就拿已有帧收工
-          v.addEventListener("ended", () => { clearInterval(stall); fin(); }, { once: true });
+          v.addEventListener("ended", fin, { once: true });
           v.requestVideoFrameCallback(onFrame);
-          const pp = v.play();
-          if (pp && pp.catch) pp.catch(() => { clearInterval(stall); fail("SKIP"); });   // 播放被拒（策略/格式）→ 回退 seek
-        }).then(fr => (fr.length ? fr : null)).catch(e => {
-          if (e && e.skip) return null;
-          stopPrev();
-          throw e;
+          v.play().catch(() => fail("视频播放失败"));
+          const stall = setInterval(() => {
+            if (Date.now() - lastAct > 12000) { clearInterval(stall); fin(); }   // 解码卡住就拿已有的帧收工
+          }, 2000);
+          const chk = setInterval(() => { if (i >= n) { clearInterval(chk); clearInterval(stall); v.pause(); resolve(); } }, 200);
         });
-      }
-      if (!extracted) {
-        for (let i = 0; i < n; i++) {                     // 老内核无 rVFC 或播放被拒：回退 seek 逐帧
+      } else {
+        for (let i = 0; i < n; i++) {                     // 老内核无 rVFC：回退 seek 逐帧
           await seekP(v, Math.min((i + 0.5) * dur / n, Math.max(0, dur - 0.05)));
           drawNow();
           parts.push(grab());
           onProg(`抽帧 ${i + 1}/${n}`, 5 + Math.round(((i + 1) / n) * 60));
         }
       }
-      stopPrev();
+      v.remove();
       try {                                               // 音轨 → WAV 留档（最多 30s）
         onProg("提取音轨…", 70);
         const AC = window.AudioContext || window.webkitAudioContext;
