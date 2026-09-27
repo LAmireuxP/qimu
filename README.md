@@ -11,13 +11,13 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 - 调顺序：按住每行左边的 ⠿ 上下拖，或者用 ▲▼ 一格一格移，松手就存
 - 不要动画：选「不播放动画」，开机黑屏直接进系统
 - 视频转动画：手机里的视频（MP4/MOV/MKV/WEBM）直接转成开机动画并导入，全程手机本地完成，不用电脑
-- 编辑动画：每个动画的「编辑」弹窗里，可以改名字、调分辨率（自适应屏幕、交换宽高或自己填）、导出包里夹带的音频
+- 编辑动画：每个动画的「编辑」弹窗里，可以改名字、调分辨率（自适应屏幕、交换宽高或自己填）
 - 分辨率自动适配：刷入时自动改到你屏幕的尺寸，不会黑边也不会被裁掉；方向画反也能自动纠正；手动调过的动画刷入时按你设的来
 - 界面跟随系统深浅色，也可以手动固定成浅色或深色
 
 ## 安装
 
-管理器里刷 [Releases](https://github.com/LAmireuxP/qimu/releases) 里最新的 zip，重启，再打开模块的「设置」进界面。里面自带一个 LineageOS 的动画和「不播放动画」，装完就能用。升级直接刷新包，你之前选的动画和排序都会保留。
+管理器里刷 [Releases](https://github.com/LAmireuxP/qimu/releases) 里最新的 zip，重启，再打开模块的「设置」进界面。里面自带一个「不播放动画」和一个演示动画，装完就能用；想换动画自己导入即可。升级直接刷新包，你之前选的动画和排序都会保留。
 
 安装时会在 `/data/adb/post-fs-data.d/` 和 `/data/adb/service.d/` 各放一个 `qimu-guard.sh`。这两个目录在模块外面，作用只有一个：模块被关掉或删掉之后，把那条主题路径上的动画文件清掉，让开机动画回到出厂。卸载模块时脚本会一起删掉。
 
@@ -26,12 +26,12 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 1. 进界面，点某个动画的「应用」，重启
 2. 加自己的动画：zip 得是 **ZIP_STORED 不压缩**、根目录有 `desc.txt`，点「选择文件」自己翻到它所在的位置导入。格式不对界面会告诉你原因
 3. 想用视频当开机动画：点「视频转换」，选手机里的视频（下载/影片目录，或自己翻目录）一键转换导入，不用电脑
-4. 改名字、调分辨率或导出音频：点动画的「编辑」，都在弹窗里；正在用的动画改完会自动重新刷入
+4. 改名字、调分辨率：点动画的「编辑」，都在弹窗里；正在用的动画改完会自动重新刷入
 5. 正在用哪个动画，界面里有「使用中」标记
 
 `tools/pad_convert.py` 可以把随便一个 AOSP 格式的动画转成能用的：帧按 cover 方式缩放裁切到目标分辨率（满屏无黑边、无损 PNG）、desc 首行改成目标分辨率、强制不压缩。用之前 `pip install pillow`，目标尺寸跟在名字后面传，如 `python tools/pad_convert.py 源.zip 目标.zip 名字 1080x2400`。
 
-`tools/mp4_convert.py` 是视频转动画的电脑端版本，和模块里内置的「视频转换」效果一样，适合想批量转、或要精确控制帧率和分辨率的时候用：`pip install imageio-ffmpeg pillow` 之后 `python tools/mp4_convert.py 视频.mp4 动画包.zip`，视频里的音轨也会提取进包里。日常用模块界面里的「视频转换」就够了，这两个工具是备着批量处理和精细控制用的。
+`tools/mp4_convert.py` 是视频转动画的电脑端版本，和模块里内置的「视频转换」效果一样，适合想批量转、或要精确控制帧率和分辨率的时候用：`pip install imageio-ffmpeg` 之后 `python tools/mp4_convert.py 视频.mp4 动画包.zip`。日常用模块界面里的「视频转换」就够了，这两个工具是备着批量处理和精细控制用的。
 
 ## 导入哪种包
 
@@ -80,6 +80,7 @@ adb shell su -c "strings /system/lib64/libbootanimation_preapex.so | grep theme/
 
 界面「当前动画」那栏会显示这个动画的来源文件路径、刷入位置和你的屏幕分辨率，能看清「文件在哪、刷到哪」。
 
-动画都放在 `/data/adb/bootanims/`，生效文件是 `/data/system/theme/boots/bootanimation.zip`。想用命令行操作的话，`bin/ctl.sh` 有这些子命令：`list / status / info / select / fit / desc / setres / swap / rename / import / delete / ls / reset / order / audio / audioout / guard / unguard / deploy`。
+动画都放在 `/data/adb/bootanims/`，生效文件是 `/data/system/theme/boots/bootanimation.zip`。想用命令行操作的话，`bin/ctl.sh` 有这些子命令：`list / status / info / select / fit / desc / setres / swap / rename / import / delete / ls / reset / order / guard / unguard / deploy`。
 
-协议 MIT。仓库里没有商业 IP 的动画：内置的 LineageOS 那个是从 LineageOS 开源项目拿的，只当个默认例子，版权还是人家的；「不播放动画」是一帧纯黑。
+协议 MIT。仓库里没有商业 IP 的动画：内置的「不播放动画」是一帧纯黑；演示动画是本模块用
+`tools/make_demo.py` 自己生成的（深色底 + 旋转加载环），想换配色/尺寸改参数重跑即可。

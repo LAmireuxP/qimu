@@ -192,11 +192,6 @@
     <input id="res-h" class="num" type="number" inputmode="numeric" placeholder="高">
     <button class="btn" id="btn-res-set">应用</button>
   </div>
-  <div class="row" style="margin-top:10px;align-items:center">
-    <div class="info"><div class="nm" style="font-size:13px;font-weight:600">包内音频</div>
-      <div class="dt" id="res-audio" style="margin-top:1px;word-break:break-all">…</div></div>
-    <button class="btn ghost" id="btn-res-audio" disabled>导出到下载</button>
-  </div>
   <div class="toolbar" style="margin-top:10px;margin-bottom:0">
     <button class="btn ghost" id="btn-res-close" style="flex:1">关闭</button>
   </div>
@@ -236,7 +231,7 @@
   </div>
   <div class="hint">选一个视频（默认列出「下载」和「影片」），转成动画包并自动导入动画库；<br>
     其他目录点「浏览其他目录」自己翻。画质：原生分辨率满屏、JPG 高质量；<br>
-    帧数上限 600 帧，长视频建议先剪短；视频里的音轨会一并存档（开机动画本身不播声音）。<br>
+    帧数上限 600 帧，长视频建议先剪短；只取画面，不带声音。<br>
     格式需网页能解：MP4/H.264 最稳。</div>
 </div>
 
@@ -656,7 +651,7 @@
       });
       row.appendChild(apply);
 
-      // 编辑弹窗：分辨率（自适应/交换/自定义）+ 改名 + 包内音频
+      // 编辑弹窗：分辨率（自适应/交换/自定义）+ 改名
       const res = document.createElement("button");
       res.className = "btn ghost";
       res.textContent = "编辑";
@@ -764,8 +759,8 @@
         b.onclick = () => withBusy(async () => {
           const r = await ctl("import", p[3]);
           if (/OK /.test(r)) {
-            const m = /stored=(\S+)/.exec(r), am = /audio=(\d+)/.exec(r);
-            toast("已导入 " + (m ? m[1] : "") + (am ? "（含 " + am[1] + " 个音频）" : ""), "ok");
+            const m = /stored=(\S+)/.exec(r);
+            toast("已导入 " + (m ? m[1] : ""), "ok");
             await refresh();
           }
           else toast(friendly(r), "err");
@@ -793,7 +788,6 @@
   /* ------------------ 视频转动画 ------------------ */
   // 全程在手机本地完成：WebView 用系统解码器抽帧（<video>+canvas），
   // JS 打 STORED zip（自带 CRC32，不依赖设备上的 zip 工具），root 桥分块写回再走 import。
-  const VID_EXTS = ["mp4", "mov", "mkv", "webm", "m4v", "3gp"];
   const VID_MIME = { mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime",
                      mkv: "video/x-matroska", webm: "video/webm", "3gp": "video/3gpp" };
   let vidSel = null, vidFps = 30, vidLoop = "auto", vidBrowse = null, vidQuality = 0.92;
@@ -847,11 +841,18 @@
 
   // 桥的单条命令有长度上限，也为了控制内存：文件按块 dd|base64 读回。
   // 读的各块互相独立，4 路并行；块 256KB（输出 b64 ~341KB，走桥的 stdout 没问题）。
-  // 注意 dd 的 skip 是按块算的：固定 bs 按块跳，最后一个不完整块单独 tail -c 按字节取——
-  // 之前最后一块改了 bs 却没换算 skip，读成文件中段的数据，视频尾部的 moov 一坏就「解不动」
-  async function readDeviceBytes(path, onProg) {
+  // 每块都是固定 bs + skip（按块跳）+ count=1：dd 在文件尾只会读到剩余字节，最后一块不完整也正确。
+  // （历史上这里按「最后一块改 bs」处理过，skip 没跟着换算，结果读成文件中段的数据、视频尾部
+  //  的 moov 一坏就「解不动」）
+  //
+  // limit：文件大小上限（字节）。必须在「读」之前判——放到读完之后判的话，超大文件会先被
+  // 整段读进 JS 内存，WebView 直接被 OOM 杀掉，根本走不到那句校验。
+  async function readDeviceBytes(path, onProg, limit) {
     const sz = parseInt((await run(`wc -c < ${quote(path)}`)).trim(), 10) || 0;
     if (!sz) throw new Error("读不到视频内容");
+    if (limit && sz > limit) {
+      throw new Error(`视频太大（${Math.round(sz / 1048576)}MB > ${Math.round(limit / 1048576)}MB），先剪短再转`);
+    }
     const CH = 262144, CONC = 4;
     const n = Math.ceil(sz / CH), parts = new Array(n);
     let done = 0, cursor = 0;
@@ -889,24 +890,6 @@
     await run(`cat ${shardFiles.filter((_, s) => s * per < bytes.length).map(quote).join(" ")} > ${quote(path)} && rm -f ${shardFiles.map(quote).join(" ")}`);
     const sz = parseInt((await run(`wc -c < ${quote(path)}`)).trim(), 10) || 0;
     if (sz !== bytes.length) throw new Error(`写回校验失败（${sz} ≠ ${bytes.length}）`);
-  }
-
-  function audioBufferToWav(buf, maxSec) {
-    const sr = buf.sampleRate, chs = Math.min(2, buf.numberOfChannels);
-    const n = Math.min(buf.length, Math.floor(sr * (maxSec || 30)));
-    const dv = new DataView(new ArrayBuffer(44 + n * chs * 2));
-    const ws = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
-    ws(0, "RIFF"); dv.setUint32(4, 36 + n * chs * 2, true); ws(8, "WAVE"); ws(12, "fmt ");
-    dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, chs, true);
-    dv.setUint32(24, sr, true); dv.setUint32(28, sr * chs * 2, true); dv.setUint16(32, chs * 2, true);
-    dv.setUint16(34, 16, true); ws(36, "data"); dv.setUint32(40, n * chs * 2, true);
-    const ch = []; for (let c = 0; c < chs; c++) ch.push(buf.getChannelData(c));
-    let o = 44;
-    for (let i = 0; i < n; i++) for (let c = 0; c < chs; c++) {
-      const v = Math.max(-1, Math.min(1, ch[c][i]));
-      dv.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7FFF, true); o += 2;
-    }
-    return new Uint8Array(dv.buffer);
   }
 
   const seekP = (v, t) => new Promise(res => {
@@ -1003,16 +986,6 @@
       }
       if (extracted) parts.push(...extracted);            // rVFC 播出来的帧并回打包清单（漏了这句就会打出零帧的包）
       stopPrev();
-      try {                                               // 音轨 → WAV 留档（最多 30s）
-        onProg("提取音轨…", 70);
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if (AC) {
-          const ac = new AC();
-          const buf = await ac.decodeAudioData(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length));
-          if (buf && buf.length > 0) parts.push({ name: "sound/poweron.wav", data: audioBufferToWav(buf, 30) });
-          ac.close && ac.close();
-        }
-      } catch (_) { /* 没音轨或解不了就跳过 */ }
 
       const frameCount = parts.filter(p => p.name.indexOf("part0/") === 0).length;
       if (!frameCount) throw new Error("没有抽到画面帧，已中止：视频可能解码异常，换个 MP4 再试");
@@ -1029,7 +1002,7 @@
       const r = await ctl("import", tmp);
       await run(`rm -f ${quote(tmp)}`);
       if (!/OK /.test(r)) throw new Error(friendly(r));
-      return { stored: (/stored=(\S+)/.exec(r) || [])[1] || "", audio: +((/audio=(\d+)/.exec(r) || [])[1] || 0), frames: frameCount, fps: fpsEff };
+      return { stored: (/stored=(\S+)/.exec(r) || [])[1] || "", frames: frameCount, fps: fpsEff };
     } finally {
       URL.revokeObjectURL(url);
     }
@@ -1096,8 +1069,6 @@
     $("res-name-in").value = name;
     $("res-info").textContent = "读取中…";
     $("res-w").value = ""; $("res-h").value = "";
-    $("res-audio").textContent = "…";
-    $("btn-res-audio").disabled = true;
     const out = String(await ctl("desc", idx));
     if (/^\s*ERROR/.test(out)) { $("res-info").textContent = friendly(out); return; }
     const p = {};
@@ -1111,21 +1082,6 @@
     $("res-info").textContent = info;
     $("res-w").value = p.desc_w || "";
     $("res-h").value = p.desc_h || "";
-    // 包内音频（旧导入的包会现场补提取）
-    try {
-      const a = String(await ctl("audio", idx));
-      if (/^\s*ERROR/.test(a)) { $("res-audio").textContent = friendly(a); return; }
-      const ap = {};
-      a.split("\n").forEach(l => { const i = l.indexOf("="); if (i > 0) ap[l.slice(0, i)] = l.slice(i + 1); });
-      const n = parseInt(ap.audio_n, 10) || 0;
-      if (n > 0) {
-        const files = a.split("\n").filter(l => l.startsWith("FILE=")).map(l => l.slice(5)).join("、");
-        $("res-audio").textContent = "♪ " + n + " 个：" + files;
-        $("btn-res-audio").disabled = false;
-      } else {
-        $("res-audio").textContent = "这个包里没有音频";
-      }
-    } catch (_) { $("res-audio").textContent = "读取失败"; }
   }
 
   // fit/swap/setres 的 OK 行自带 to=宽x高 —— 直接拿来更新面板，省一次 desc 往返；
@@ -1146,7 +1102,7 @@
   $("btn-res-close").onclick = closeRes;
   $("res-mask").onclick = closeRes;               // 点遮罩也能关
 
-  // 改名：库文件、音频留档、手动名单、生效记录一起联动（shell 端 rename 命令处理）
+  // 改名：库文件、手动名单、生效记录一起联动（shell 端 rename 命令处理）
   $("btn-res-rename").onclick = () => withBusy(async () => {
     if (!resCtx) return;
     const nn = ($("res-name-in").value || "").trim();
@@ -1200,17 +1156,6 @@
     if (/OK /.test(r)) {
       if (!applyResFromOk(r)) await openRes(resCtx.idx, resCtx.name);
       toast("已设为 " + w + "×" + h, "ok"); await refresh();
-    }
-    else toast(friendly(r), "err");
-  });
-
-  // 导出包内音频到下载目录
-  $("btn-res-audio").onclick = () => withBusy(async () => {
-    if (!resCtx) return;
-    const r = await ctl("audioout", resCtx.idx);
-    if (/OK /.test(r)) {
-      const m = / to=(\S+)/.exec(r);
-      toast("音频已导出到 " + (m ? m[1] : "下载目录"), "ok");
     }
     else toast(friendly(r), "err");
   });
@@ -1293,13 +1238,12 @@
     vidFps = Math.max(1, Math.min(60, parseInt($("vid-fps").value, 10) || 30));
     const bytes = await readDeviceBytes(vidSel.path, (d, t) => {
       $("vid-prog").textContent = `读取视频 ${Math.round((d / t) * 100)}%`;
-    });
-    if (bytes.length > 150 * 1024 * 1024) { toast("视频太大（>150MB），先剪短再转", "err"); return; }
+    }, 150 * 1024 * 1024);
     const res = await convertVideo(bytes, vidSel.name.split(".").pop().toLowerCase(),
       (vidSel.name.replace(/\.[^.]+$/, "") || "视频转动画") + ".zip", (txt, pct) => {
       $("vid-prog").textContent = txt + (pct != null ? `（${pct}%）` : "");
     });
-    toast(`转换完成：${res.frames} 帧 ${res.fps}fps，已导入 ${res.stored}${res.audio ? "（含音频）" : ""}，重启生效`, "ok");
+    toast(`转换完成：${res.frames} 帧 ${res.fps}fps，已导入 ${res.stored}，重启生效`, "ok");
     await refresh();
   });
 

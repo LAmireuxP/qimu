@@ -7,5 +7,10 @@ rm -f "$THEME_FILE" 2>/dev/null
 # 兼容旧版可能留下的符号链接
 [ -L "$THEME_FILE" ] && rm -f "$THEME_FILE" 2>/dev/null
 rm -f /data/adb/post-fs-data.d/qimu-guard.sh /data/adb/service.d/qimu-guard.sh 2>/dev/null
-setprop debug.sf.nobootanimation 0 2>/dev/null
+# 卸载脚本在开机早期阶段执行，setprop 有与 init 互等死锁的风险 → 优先 resetprop -n
+if command -v resetprop >/dev/null 2>&1; then
+  resetprop -n debug.sf.nobootanimation 0 2>/dev/null
+else
+  setprop debug.sf.nobootanimation 0 2>/dev/null
+fi
 echo "启幕：已清理主题路径动画与守卫脚本，重启后恢复系统默认"

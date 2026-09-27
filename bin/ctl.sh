@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # 开机动画管理器 - 控制脚本
-# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|ls DIR|reset|order NAME...|audio N|audioout N|guard|unguard|deploy}
+# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy}
 #
 # 几处踩过坑的地方，改的时候注意：
 #   - 动画库列表每次运行只枚举一次，order.txt 一次读进来用纯 shell 比较，
@@ -19,15 +19,15 @@ SELECTED_FILE="$STATE_DIR/selected.txt"
 THEME_DIR="/data/system/theme/boots"
 THEME_FILE="$THEME_DIR/bootanimation.zip"
 STAMP_FILE="$STATE_DIR/deployed.stamp"
+# desc 信息缓存（每行「名字/宽/高/帧率/大小」），让 cmd_list 免掉「每行 fork 一次 unzip」。
+# 新鲜度：名字集合变了（改名/删除/导入）由 cmd_list 的内容比对自动收敛；
+# 唯独 desc_replace 是等长改写、文件大小不变，只能靠它自己主动删缓存。
+DESC_CACHE="$STATE_DIR/desc.cache"
 NO_ANIM_NAME="不播放动画"
 ORDER_FILE="$STATE_DIR/order.txt"
 # 手动分辨率名单：在界面/命令里 setres、swap 设过的动画记在这里，
 # 部署/导入时的自动适配跳过它们（否则一部署就被「适配到屏幕」覆盖回去，手动调的等于白调）
 MANUAL_FILE="$STATE_DIR/manual.txt"
-# 包内音频：导入时包里带的音频（有的包会夹 boot.ogg/mp3）自动解到这里，按动画名分目录。
-# bootanimation 本身不播声音，解出来是给用户留档/取用的（删动画时一起删）
-AUDIO_DIR="$LIB_DIR/audio"
-AUDIO_EXTS="mp3 ogg oga wav m4a aac flac opus"
 
 # fit_zip 算好后把「目标宽 高」放这里，供 cmd_fit 汇报用
 FIT_TW=""; FIT_TH=""
@@ -42,6 +42,9 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >>"$LOG_DIR/ctl.log" 2>/dev/nul
 # 设备上 fork+exec 很贵（一次 5-15ms），info/部署这类每次操作要跑几十条命令的路径
 # 能用参数展开解决的都不开子进程；只有 unzip/wm/grep/dd 这种必须调外部命令的才 fork
 CR=$(printf '\r'); TAB=$(printf '\t')
+# 换行符用源码里的字面量（省一次 fork）——后面纯 shell 拆行/查表都拿它当分隔符
+NL='
+'
 
 # 取不带 .zip 的动画名
 name_of() { n=${1##*/}; printf '%s\n' "${n%.zip}"; }
@@ -51,9 +54,25 @@ file_size() {
   echo "${1:-}"
 }
 
-# 清理会被列表格式/模式匹配弄坏的名字（仅导入时调用）
+# 清理会被列表/模式匹配弄坏的名字（导入、改名时调用）
+# 注意：字符类 [*?[\]|\\] 在标准 sed 下会被解析成「多字符序列」而完全匹配不上（实测是哑弹，
+#      一个字符都不替换）。所以这里逐个字符替换。另外 / 不能被保留——它会让名字越出动画库
+#      目录（rename 传 ../x 就会写到 /data/adb/bootanims 外），一并换成 _
 sanitize_name() {
-  printf '%s' "$1" | tr -d '\t\r\n' | sed 's/[*?[\]|\\]/_/g' | cut -c1-60
+  printf '%s' "$1" | tr -d '\t\r\n' \
+    | sed 's/\*/_/g; s/?/_/g; s/\[/_/g; s/\]/_/g; s/|/_/g; s/\\/_/g; s|/|_|g' \
+    | cut -c1-60
+}
+
+# 设置系统属性。post-fs-data 阶段（本模块 post-fs-data.sh 会走 deploy）用 setprop 会与 init
+# 互等死锁——KernelSU / Magisk 官方文档都明令「post-fs-data 用 setprop 会死锁，请改用
+# resetprop -n」。所以优先 resetprop -n（直写属性区、不经 init）；老环境没有 resetprop 才退回 setprop。
+nb_setprop() {
+  if command -v resetprop >/dev/null 2>&1; then
+    resetprop -n "$1" "$2" 2>/dev/null && return 0
+  fi
+  setprop "$1" "$2" 2>/dev/null
+  return 0
 }
 
 # ---------- 校验 ----------
@@ -139,12 +158,12 @@ desc_replace() {
   dr_pad=$(( ${#dr_old} - ${#dr_new} ))
   [ "$dr_pad" -ge 0 ] || return 2
   dr_repl=$(printf "%s%*s" "$dr_new" "$dr_pad" "")
-  dr_g=$(grep -abo "$dr_old" "$dr_f" 2>/dev/null) || return 1
+  dr_g=$(grep -aboF "$dr_old" "$dr_f" 2>/dev/null) || return 1
   dr_off=${dr_g%%:*}                             # 多处匹配时取第一处；desc 行里不会有冒号
   [ -n "$dr_off" ] || return 1
   if printf '%s' "$dr_repl" | dd of="$dr_f" bs=1 seek="$dr_off" conv=notrunc 2>/dev/null; then
     FIT_WROTE=1                                  # 标记 desc 被改写过，部署据此决定必须重拷
-    rm -f "$STAMP_FILE" 2>/dev/null
+    rm -f "$STAMP_FILE" "$DESC_CACHE" 2>/dev/null  # desc 等长改写大小不变，缓存只能这样失效
     return 0
   fi
   return 1
@@ -178,47 +197,6 @@ manual_del() {
     printf '%s\n' "$mn_l" >>"$mn_tmp"
   done <"$MANUAL_FILE"
   mv -f "$mn_tmp" "$MANUAL_FILE" 2>/dev/null || rm -f "$mn_tmp"
-}
-
-# ---------- 包内音频 ----------
-# 有的动画包会夹带音频（boot.ogg / sound/*.mp3 之类）。bootanimation 不播声音，
-# 但音频值得留档：导入时自动解到 audio/<动画名>/，界面可查看、可导出到下载目录。
-# 注意： toybox unzip 的「无匹配」也 rc=0 且会建空目录，所以以解出文件数为准，0 就把目录删掉。
-has_audio() {
-  set -- "$AUDIO_DIR/$1"/*
-  [ -e "$1" ]                                    # 顶层条目即可（嵌套目录也算有）
-}
-audio_extract() {                                # $1=zip 路径 $2=动画名 → 输出提取到的文件数
-  ad="$AUDIO_DIR/$2"
-  rm -rf "$ad" 2>/dev/null
-  mkdir -p "$ad" 2>/dev/null || { echo 0; return; }
-  # 门禁：先按扩展名在 -l 全文里找（名字列格式各家 unzip 不同，但音频扩展名总在行尾，
-  # 按行尾匹配可靠）。没有就直接返回，省掉大包的全量解压
-  au_pat='[.](mp3|ogg|oga|wav|m4a|aac|flac|opus)[[:space:]]*$'
-  unzip -l "$1" 2>/dev/null | grep -iqE "$au_pat" || { rm -rf "$ad" 2>/dev/null; echo 0; return; }
-  # 有音频 → 全量解到临时目录再按文件名挑（各家 unzip 的通配语义不一致，按名字最稳）
-  au_tmp="$LIB_DIR/.audio.$$.tmp"
-  rm -rf "$au_tmp" 2>/dev/null
-  mkdir -p "$au_tmp" 2>/dev/null || { rm -rf "$ad" 2>/dev/null; echo 0; return; }
-  unzip -o "$1" -d "$au_tmp" >/dev/null 2>&1
-  find "$au_tmp" -type f \( -iname '*.mp3' -o -iname '*.ogg' -o -iname '*.oga' \
-    -o -iname '*.wav' -o -iname '*.m4a' -o -iname '*.aac' -o -iname '*.flac' \
-    -o -iname '*.opus' \) > "$au_tmp/.list" 2>/dev/null
-  while IFS= read -r au_f; do
-    [ -n "$au_f" ] || continue
-    au_rel=${au_f#"$au_tmp"/}
-    au_sub=${au_rel%/*}
-    [ "$au_sub" = "$au_rel" ] || mkdir -p "$ad/$au_sub" 2>/dev/null
-    mv -f "$au_f" "$ad/$au_rel" 2>/dev/null
-  done < "$au_tmp/.list"
-  rm -rf "$au_tmp" 2>/dev/null
-  au_n=$(find "$ad" -type f 2>/dev/null | grep -c .)
-  [ "$au_n" -gt 0 ] || rm -rf "$ad" 2>/dev/null
-  echo "$au_n"
-}
-audio_ensure() {                                 # $1=zip 路径 $2=动画名：目录没有就补提取（兼容旧导入的包）
-  has_audio "$2" && return 0
-  audio_extract "$1" "$2" >/dev/null
 }
 
 # 本机屏幕物理分辨率（输出「宽 高」；读不到就输出空）。只 fork 一次 wm，行解析用纯 shell
@@ -299,25 +277,29 @@ load_entries() {
   ENTRIES=$(ls -1 "$LIB_DIR"/*.zip 2>/dev/null | sort)
 }
 
-# 按「order.txt 里登记的先后 + 其余按名称」输出全部动画路径
+# 按「order.txt 里登记的先后 + 其余按名称」输出全部动画路径。
+# 注意：本机 printf 不是内建（走 /system/bin/printf，一次 ~7ms），所以这里拼好整块再一次吐出，
+# 不要每行 printf 一次。行遍历也改成纯 shell，省掉 printf|while 那个管道子 shell。
 entry_paths() {
   load_entries
-  seen="|"
+  seen="|"; ep_out=""
   if [ -s "$ORDER_FILE" ]; then
     # 一次读入 order.txt：纯 shell 建集合，不 fork grep
-    while IFS= read -r n; do
+    while IFS= read -r n || [ -n "$n" ]; do
       [ -n "$n" ] || continue
       seen="$seen$n|"
-      [ -f "$LIB_DIR/$n.zip" ] && printf '%s\n' "$LIB_DIR/$n.zip"
+      [ -f "$LIB_DIR/$n.zip" ] && ep_out="$ep_out$LIB_DIR/$n.zip$NL"
     done <"$ORDER_FILE"
   fi
-  [ -n "$ENTRIES" ] || return 0
-  printf '%s\n' "$ENTRIES" | while IFS= read -r p; do
+  ep_rest="$ENTRIES"
+  while [ -n "$ep_rest" ]; do
+    p=${ep_rest%%"$NL"*}; [ "$p" = "$ep_rest" ] && ep_rest="" || ep_rest=${ep_rest#"$p"$NL}
     [ -n "$p" ] || continue
     n=${p##*/}; n=${n%.zip}
     case "$seen" in *"|$n|"*) continue ;; esac
-    printf '%s\n' "$p"
+    ep_out="$ep_out$p$NL"
   done
+  printf '%s' "$ep_out"
 }
 
 entry_count() {
@@ -350,14 +332,6 @@ active_path() {
   [ -n "$an" ] && [ -f "$LIB_DIR/$an.zip" ] && echo "$LIB_DIR/$an.zip"
 }
 
-# 列表里每行显示的「宽×高 · 帧率fps」（读不出就空）。复用 desc_line+parse，每行只 fork 一次 unzip
-desc_info() {
-  di_line=$(desc_line "$1")
-  [ -n "$di_line" ] || return 0
-  parse_desc_line "$di_line" || return 0
-  printf '%s\n' "$D_W×$D_H · ${D_FPS}fps"
-}
-
 # ---------- 守卫脚本（关键：让「关闭模块」也能恢复出厂动画） ----------
 # 模块被关闭(disable)时，模块自己的任何脚本都不会运行，所以「清理主题路径」这件事
 # 必须交给一个位于模块之外、始终会运行的脚本。/data/adb/post-fs-data.d 正合适：
@@ -382,7 +356,12 @@ if [ -d "$MOD" ] && [ ! -e "$MOD/disable" ] && [ ! -e "$MOD/remove" ]; then
   exit 0
 fi
 [ -e "$THEME" ] && rm -f "$THEME" 2>/dev/null
-setprop debug.sf.nobootanimation 0 2>/dev/null
+# 本脚本跑在 post-fs-data 阶段，setprop 会与 init 互等死锁（官方文档明令）→ 优先 resetprop -n
+if command -v resetprop >/dev/null 2>&1; then
+  resetprop -n debug.sf.nobootanimation 0 2>/dev/null
+else
+  setprop debug.sf.nobootanimation 0 2>/dev/null
+fi
 exit 0
 GUARD_EOF
     chmod 0755 "$g" 2>/dev/null
@@ -398,6 +377,9 @@ remove_guard() {
 }
 
 # ---------- 部署到主题路径 ----------
+# 主题路径上文件的属主/权限/SELinux 标签（best-effort，失败不拦）
+theme_own() { chown system_theme:system_theme "$1" 2>/dev/null; chmod "$2" "$1" 2>/dev/null; chcon u:object_r:theme_data_file:s0 "$1" 2>/dev/null; }
+
 deploy_active() {
   ap=$(active_path)
   if [ -z "$ap" ]; then log "deploy skipped: no active animation"; return 1; fi
@@ -407,10 +389,10 @@ deploy_active() {
 
   # 「不播放动画」：设 debug.sf.nobootanimation=1，让 SurfaceFlinger 不启动 bootanim 进程
   if [ "$an" = "$NO_ANIM_NAME" ]; then
-    setprop debug.sf.nobootanimation 1 2>/dev/null
+    nb_setprop debug.sf.nobootanimation 1
     log "debug.sf.nobootanimation=1 (不播放动画)"
   else
-    setprop debug.sf.nobootanimation 0 2>/dev/null
+    nb_setprop debug.sf.nobootanimation 0
   fi
 
   # 守卫脚本随部署一并确保存在（模块被关闭后由它负责清理）
@@ -431,12 +413,8 @@ deploy_active() {
   new_size=$(file_size "$ap")
   stamp_val="$an:$new_size"
 
-  if [ ! -d "$THEME_DIR" ]; then
-    mkdir -p "$THEME_DIR" 2>/dev/null || { log "theme dir create failed"; return 1; }
-  fi
-  chown system_theme:system_theme "$THEME_DIR" 2>/dev/null
-  chmod 0775 "$THEME_DIR" 2>/dev/null
-  chcon u:object_r:theme_data_file:s0 "$THEME_DIR" 2>/dev/null
+  [ -d "$THEME_DIR" ] || mkdir -p "$THEME_DIR" 2>/dev/null || { log "theme dir create failed"; return 1; }
+  theme_own "$THEME_DIR" 0775
 
   # desc 没被这次部署改写（FIT_WROTE 空）且大小一致 → 主题里那份多半就是当前的，
   # md5 确认后跳过；desc 改写过就无论如何重拷，保证手动设的分辨率真落到生效文件上
@@ -462,9 +440,7 @@ deploy_active() {
   tmp="$THEME_FILE.tmp.$$"
   rm -f "$tmp" 2>/dev/null
   cp -f "$ap" "$tmp" 2>/dev/null || { log "theme copy failed"; rm -f "$tmp"; return 1; }
-  chown system_theme:system_theme "$tmp" 2>/dev/null
-  chmod 0644 "$tmp" 2>/dev/null
-  chcon u:object_r:theme_data_file:s0 "$tmp" 2>/dev/null
+  theme_own "$tmp" 0644
   if mv -f "$tmp" "$THEME_FILE" 2>/dev/null; then
     printf '%s\n' "$stamp_val" >"$STAMP_FILE" 2>/dev/null
     log "theme deployed: $an ($new_size bytes)"
@@ -476,18 +452,70 @@ deploy_active() {
 }
 
 # ---------- 命令 ----------
+# 编号校验（$2 = 编号非法时要显示的提示）
+need_idx() { case "$1" in ''|*[!0-9]*) echo "ERROR $2"; return 1 ;; esac; return 0; }
+# 取第 N 个动画的路径到 EP
+take_entry() { EP=$(entry_at "$1"); [ -n "$EP" ] && [ -f "$EP" ] || { echo "ERROR 找不到该动画"; return 1; }; }
+# 读 desc 首行到 D_LINE，解析出 D_W/D_H/D_FPS
+read_desc() { D_LINE=$(desc_line "$1"); [ -n "$D_LINE" ] || { echo "ERROR 读不到 desc.txt"; return 1; }; parse_desc_line "$D_LINE" || { echo "ERROR desc 不是标准格式"; return 1; }; }
+# 原地改写 desc 首行（$4 = 「新串更长」时的提示语）
+write_desc() {
+  desc_replace "$1" "$2" "$3"; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) echo "ERROR $4"; return 1 ;;
+    *) echo "ERROR 写入 desc 失败"; return 1 ;;
+  esac
+}
+# 「宽x高」，读不到屏幕就是「未知」
+screen_size() { wh=$(screen_wh); if [ -n "$wh" ]; then echo "${wh%% *}x${wh##* }"; else echo "未知"; fi; }
+
+# 列表：每行 fork 一次 unzip + 一次 wc 的话，12 个动画要 400ms（fork 一次 5~10ms，与包大小无关）。
+# 所以这里 —— 大小用一次 wc -c 全取（1 次 fork 顶 N 次）、「宽×高·帧率」查 desc.cache、
+# 行遍历与查表全用纯 shell（不 fork）。缓存全命中时整条 list 只剩枚举 + 一次 wc 的开销。
 cmd_list() {
-  i=0
-  an=$(active_name)
-  entry_paths | while IFS= read -r p; do
+  # 所有包的大小 → 查表串（每段「换行 名字<TAB>大小」，前置换行方便整段定位）
+  list_sz=""; ls_rest=$(wc -c "$LIB_DIR"/*.zip 2>/dev/null)
+  while [ -n "$ls_rest" ]; do
+    ls_l=${ls_rest%%"$NL"*}; [ "$ls_l" = "$ls_rest" ] && ls_rest="" || ls_rest=${ls_rest#"$ls_l"$NL}
+    ls_l=${ls_l#"${ls_l%%[! ]*}"}                 # wc 多文件时数字右对齐，先去掉前导空格
+    case "$ls_l" in *" total") continue ;; esac   # 多文件时它还会多打一行汇总
+    ls_n=${ls_l#* }; ls_n=${ls_n##*/}
+    list_sz="$list_sz$NL${ls_n%.zip}$TAB${ls_l%% *}"
+  done
+  # desc 缓存（纯 shell 读入，不用 cat）
+  list_c=""; [ -s "$DESC_CACHE" ] && while IFS= read -r ls_c || [ -n "$ls_c" ]; do
+    list_c="$list_c$ls_c$NL"
+  done <"$DESC_CACHE"
+
+  an=$(active_name); list_new=""; list_out=""; i=0; rest=$(entry_paths)
+  while [ -n "$rest" ]; do
+    p=${rest%%"$NL"*}; [ "$p" = "$rest" ] && rest="" || rest=${rest#"$p"$NL}
     i=$((i + 1))
     n=${p##*/}; n=${n%.zip}
-    act=no
-    [ "$n" = "$an" ] && act=yes
-    info=$(desc_info "$p")
-    has_audio "$n" && info="$info ♪"              # 包里有音频留档就标一笔
-    printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$(file_size "$p")" "$act" "$info"
+    sz=""
+    case "$list_sz" in *"$NL$n$TAB"*) sz=${list_sz#*"$NL$n$TAB"}; sz=${sz%%"$NL"*} ;; esac
+    w=""; h=""; f=""
+    case "$NL$list_c" in
+      *"$NL$n$TAB"*)
+        cr=${list_c#*"$NL$n$TAB"}; cr=${cr%%"$NL"*}
+        w=${cr%%"$TAB"*}; cr=${cr#*"$TAB"}
+        h=${cr%%"$TAB"*}; cr=${cr#*"$TAB"}
+        f=${cr%%"$TAB"*}; cr=${cr#*"$TAB"}
+        [ "$cr" = "$sz" ] || { w=""; h=""; f=""; }   # 大小对不上 = 包被换过，缓存作废
+        ;;
+    esac
+    if [ -z "$w" ]; then                             # 只有首次/包变更才走这里（会 fork 一次 unzip）
+      di=$(desc_line "$p")
+      [ -n "$di" ] && parse_desc_line "$di" && { w=$D_W; h=$D_H; f=$D_FPS; }
+    fi
+    [ -n "$w" ] && list_new="$list_new$n$TAB$w$TAB$h$TAB$f$TAB$sz$NL"
+    info=""; [ -n "$w" ] && info="$w×$h · ${f}fps"
+    act=no; [ "$n" = "$an" ] && act=yes
+    list_out="$list_out$i$TAB$n$TAB$sz$TAB$act$TAB$info$NL"
   done
+  [ "$list_new" = "$list_c" ] || printf '%s' "$list_new" >"$DESC_CACHE" 2>/dev/null
+  printf '%s' "$list_out"                            # 整块一次吐出（printf 很贵，别每行一次）
 }
 
 cmd_status() {
@@ -497,8 +525,7 @@ cmd_status() {
   echo "active_path=$(active_path)"
   echo "theme_path=$THEME_FILE"
   echo "library=$LIB_DIR"
-  wh=$(screen_wh)
-  if [ -n "$wh" ]; then echo "screen=${wh%% *}x${wh##* }"; else echo "screen=未知"; fi
+  echo "screen=$(screen_size)"
   echo "count=$(entry_count)"
   if [ -f "$THEME_FILE" ]; then
     echo "theme_size=$(file_size "$THEME_FILE")"
@@ -522,12 +549,9 @@ cmd_info() {
 }
 
 cmd_select() {
-  idx="$1"
-  case "$idx" in ''|*[!0-9]*) echo "ERROR 编号无效"; return 1;; esac
-  p=$(entry_at "$idx")
-  if [ -z "$p" ] || [ ! -f "$p" ]; then echo "ERROR 找不到该动画"; return 1; fi
-  validate_zip "$p" || { echo "ERROR $VALID_MSG"; return 1; }
-  n=$(name_of "$p")
+  need_idx "$1" "编号无效" && take_entry "$1" || return 1
+  validate_zip "$EP" || { echo "ERROR $VALID_MSG"; return 1; }
+  n=$(name_of "$EP")
   printf '%s\n' "$n" >"$SELECTED_FILE" 2>/dev/null || { echo "ERROR 保存选择失败"; return 1; }
   if deploy_active; then
     echo "OK selected=$n"
@@ -554,15 +578,12 @@ finish_desc_change() {   # $1=命令名(fitted/setres/swap) $2=动画名 $3=目�
 
 # 手动把某个动画的 desc 适配到本机分辨率（部署时也会自动做，这里给排障/单独调用用）
 cmd_fit() {
-  idx="$1"
-  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: fit N"; return 1;; esac
-  p=$(entry_at "$idx")
-  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
+  need_idx "$1" "用法: fit N" && take_entry "$1" || return 1
   wh=$(screen_wh)
   [ -n "$wh" ] || { echo "ERROR 读不到本机分辨率"; return 1; }
-  n=$(name_of "$p")
+  n=$(name_of "$EP")
   manual_del "$n"                                # 显式自适应 = 恢复自动，移出手动名单
-  if fit_zip "$p"; then
+  if fit_zip "$EP"; then
     finish_desc_change fitted "$n" "${FIT_TW}x${FIT_TH}"   # 方向感知后实际写入的宽高
   else
     echo "ERROR 适配失败：新分辨率串比原来的长，或 desc 不是标准格式"
@@ -572,20 +593,14 @@ cmd_fit() {
 
 # 只读：打印某动画当前的 desc 分辨率，给界面里「分辨率」面板用，不写文件
 cmd_desc() {
-  idx="$1"
-  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: desc N"; return 1;; esac
-  p=$(entry_at "$idx")
-  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
-  line=$(desc_line "$p")
-  [ -n "$line" ] || { echo "ERROR 读不到 desc.txt"; return 1; }
-  parse_desc_line "$line" || { echo "ERROR desc 不是标准格式"; return 1; }
+  need_idx "$1" "用法: desc N" && take_entry "$1" || return 1
+  read_desc "$EP" || return 1
   echo "desc_w=$D_W"
   echo "desc_h=$D_H"
   echo "desc_fps=$D_FPS"
-  if manual_has "$(name_of "$p")"; then echo "mode=manual"; else echo "mode=auto"; fi
-  wh=$(screen_wh)
-  if [ -n "$wh" ]; then echo "screen=${wh%% *}x${wh##* }"; else echo "screen=未知"; fi
-  echo "desc_line=$line"
+  if manual_has "$(name_of "$EP")"; then echo "mode=manual"; else echo "mode=auto"; fi
+  echo "screen=$(screen_size)"
+  echo "desc_line=$D_LINE"
   return 0
 }
 
@@ -593,94 +608,43 @@ cmd_desc() {
 # 直接解析原始行（g 写法也行），写入标准格式时顺带归一化，不用先单独 normalize
 cmd_setres() {
   idx="$1"; w="$2"; h="$3"
-  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: setres N 宽 高"; return 1;; esac
+  need_idx "$idx" "用法: setres N 宽 高" || return 1
   case "$w" in ''|*[!0-9]*) echo "ERROR 宽必须是数字"; return 1;; esac
   case "$h" in ''|*[!0-9]*) echo "ERROR 高必须是数字"; return 1;; esac
   # 手动设定的值会进 manual.txt、部署时不再自动修正——坏值会跨重启存活，入口必须把严
   [ "${#w}" -le 5 ] && [ "${#h}" -le 5 ] || { echo "ERROR 宽高位数太长"; return 1; }
   [ "$w" -ge 100 ] && [ "$w" -le 16384 ] && [ "$h" -ge 100 ] && [ "$h" -le 16384 ] \
     || { echo "ERROR 宽高超出合理范围（100-16384）"; return 1; }
-  p=$(entry_at "$idx")
-  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
-  line=$(desc_line "$p")
-  [ -n "$line" ] || { echo "ERROR 读不到 desc.txt"; return 1; }
-  parse_desc_line "$line" || { echo "ERROR desc 不是标准格式"; return 1; }
-  n=$(name_of "$p")
+  take_entry "$idx" || return 1
+  read_desc "$EP" || return 1
+  n=$(name_of "$EP")
   new="$w $h $D_FPS"
-  desc_replace "$p" "$line" "$new"; rc=$?
-  case "$rc" in
-    0) ;;
-    2) echo "ERROR 新分辨率串比原来的长，写不进去（设备上不能重建 zip）"; return 1;;
-    *) echo "ERROR 写入 desc 失败"; return 1;;
-  esac
-  log "setres: $line -> $new ($p)"
+  write_desc "$EP" "$D_LINE" "$new" "新分辨率串比原来的长，写不进去（设备上不能重建 zip）" || return 1
+  log "setres: $D_LINE -> $new ($EP)"
   manual_add "$n"                                # 手动设定过，自动适配不再碰它
   finish_desc_change setres "$n" "${w}x${h}"
 }
 
-# 查看/导出包内音频。audio N：列出某动画的音频留档（旧导入的包现场补提取）；
-# audioout N：把音频拷到 /sdcard/Download/qimu-audio/<动画名>/ 给用户取用
-cmd_audio() {
-  idx="$1"
-  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: audio N"; return 1;; esac
-  p=$(entry_at "$idx")
-  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
-  n=$(name_of "$p")
-  audio_ensure "$p" "$n"                         # 老导入的包音频还在 zip 里，现场补提取
-  ad="$AUDIO_DIR/$n"
-  au_n=0
-  if has_audio "$n"; then
-    au_n=$(find "$ad" -type f 2>/dev/null | grep -c .)
-  fi
-  echo "audio_n=$au_n"
-  if [ "$au_n" -gt 0 ]; then
-    find "$ad" -type f 2>/dev/null | while IFS= read -r f; do
-      echo "FILE=${f#"$ad"/}"
-    done
-  fi
-  return 0
-}
-
-cmd_audioout() {
-  idx="$1"
-  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: audioout N"; return 1;; esac
-  p=$(entry_at "$idx")
-  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
-  n=$(name_of "$p")
-  audio_ensure "$p" "$n"
-  has_audio "$n" || { echo "ERROR 这个动画包里没有音频"; return 1; }
-  ad="$AUDIO_DIR/$n"
-  dst="/sdcard/Download/qimu-audio/$n"
-  rm -rf "$dst" 2>/dev/null
-  mkdir -p "$dst" 2>/dev/null || { echo "ERROR 建不了下载目录"; return 1; }
-  cp -rf "$ad"/. "$dst"/ 2>/dev/null || { echo "ERROR 拷贝失败"; return 1; }
-  find "$dst" -type f 2>/dev/null -exec chmod 0644 {} \;
-  au_n=$(find "$dst" -type f 2>/dev/null | grep -c .)
-  log "audio out: $n -> $dst ($au_n)"
-  echo "OK audioout=$n to=$dst n=$au_n"
-  return 0
-}
-
-# 交换某动画 desc 的宽高（一键修正长宽互换）。宽高位数相同，串长不变，必能写入。
+# 改动画名：库文件、手动分辨率名单、生效记录一起联动改名
 cmd_rename() {
   idx="$1"; newn="$2"
-  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: rename N 新名字"; return 1;; esac
+  need_idx "$idx" "用法: rename N 新名字" || return 1
   [ -n "$newn" ] || { echo "ERROR 名字不能为空"; return 1; }
-  p=$(entry_at "$idx")
-  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
-  oldn=$(name_of "$p")
+  take_entry "$idx" || return 1
+  oldn=$(name_of "$EP")
   newn=$(sanitize_name "$newn")
   [ -n "$newn" ] || { echo "ERROR 名字无效"; return 1; }
+  case "$newn" in
+    .*) echo "ERROR 名字不能以点开头（会变成隐藏文件，列表里看不到）"; return 1 ;;
+  esac
   [ "$newn" = "$oldn" ] && { echo "OK renamed=$newn"; return 0; }
   target="$LIB_DIR/$newn.zip"
   [ -e "$target" ] && { echo "ERROR 已有同名动画"; return 1; }
   was_active=no
   [ "$oldn" = "$(active_name)" ] && was_active=yes
-  mv -f "$p" "$target" 2>/dev/null || { echo "ERROR 改名失败"; return 1; }
+  mv -f "$EP" "$target" 2>/dev/null || { echo "ERROR 改名失败"; return 1; }
   chmod 0644 "$target" 2>/dev/null
-  # 音频留档、手动分辨率名单跟着改名
-  [ -d "$AUDIO_DIR/$oldn" ] && mv -f "$AUDIO_DIR/$oldn" "$AUDIO_DIR/$newn" 2>/dev/null
-  if manual_has "$oldn"; then manual_del "$oldn"; manual_add "$newn"; fi
+  if manual_has "$oldn"; then manual_del "$oldn"; manual_add "$newn"; fi   # 手动名单跟着改名
   # 生效中的动画改名 → 选择记录同步改，再重新部署（stamp 里记的名字也一并更新）
   if [ "$was_active" = "yes" ]; then
     printf '%s\n' "$newn" > "$SELECTED_FILE" 2>/dev/null
@@ -693,22 +657,12 @@ cmd_rename() {
 
 # 交换某动画 desc 的宽高（一键修正长宽互换）。宽高位数相同，串长不变，必能写入。
 cmd_swap() {
-  idx="$1"
-  case "$idx" in ''|*[!0-9]*) echo "ERROR 用法: swap N"; return 1;; esac
-  p=$(entry_at "$idx")
-  [ -n "$p" ] && [ -f "$p" ] || { echo "ERROR 找不到该动画"; return 1; }
-  line=$(desc_line "$p")
-  [ -n "$line" ] || { echo "ERROR 读不到 desc.txt"; return 1; }
-  parse_desc_line "$line" || { echo "ERROR desc 不是标准格式"; return 1; }
-  n=$(name_of "$p")
+  need_idx "$1" "用法: swap N" && take_entry "$1" || return 1
+  read_desc "$EP" || return 1
+  n=$(name_of "$EP")
   new="$D_H $D_W $D_FPS"                           # 宽高对调
-  desc_replace "$p" "$line" "$new"; rc=$?
-  case "$rc" in
-    0) ;;
-    2) echo "ERROR 交换后串更长，写不进去"; return 1;;
-    *) echo "ERROR 写入 desc 失败"; return 1;;
-  esac
-  log "swap: $line -> $new ($p)"
+  write_desc "$EP" "$D_LINE" "$new" "交换后串更长，写不进去" || return 1
+  log "swap: $D_LINE -> $new ($EP)"
   manual_add "$n"
   finish_desc_change swap "$n" "${D_H}x${D_W}"
 }
@@ -746,16 +700,9 @@ cmd_import() {
     # 顺手改写 desc 首行（归一化 g 写法 + 适配本机分辨率）。改的是库里这份副本，
     # 这样列表里显示的分辨率就是实际会播的尺寸，跟部署时的结果一致。
     fit_zip "$target" >/dev/null 2>&1
-    # 包里夹带的音频也一起收进来（bootanimation 不播声音，解出来是给用户留档/取用）
-    sn=${target##*/}; sn=${sn%.zip}
-    au_n=$(audio_extract "$target" "$sn")
     rm -f "$inner_tmp" 2>/dev/null             # 解包临时文件用完即删
-    log "imported: $target (audio=$au_n)"
-    if [ "$au_n" -gt 0 ]; then
-      echo "OK stored=${target##*/} audio=$au_n"
-    else
-      echo "OK stored=${target##*/}"
-    fi
+    log "imported: $target"
+    echo "OK stored=${target##*/}"
   else
     rm -f "$tmp" 2>/dev/null
     rm -f "$inner_tmp" 2>/dev/null
@@ -765,19 +712,15 @@ cmd_import() {
 }
 
 cmd_delete() {
-  idx="$1"
-  case "$idx" in ''|*[!0-9]*) echo "ERROR 编号无效"; return 1;; esac
-  p=$(entry_at "$idx")
-  if [ -z "$p" ] || [ ! -f "$p" ]; then echo "ERROR 找不到该动画"; return 1; fi
-  n=$(name_of "$p")
+  need_idx "$1" "编号无效" && take_entry "$1" || return 1
+  n=$(name_of "$EP")
   if [ "$n" = "$(active_name)" ]; then
     echo "ERROR 该动画正在使用中，请先切换到其他动画"
     return 1
   fi
-  rm -f "$p" 2>/dev/null || { echo "ERROR 删除失败"; return 1; }
+  rm -f "$EP" 2>/dev/null || { echo "ERROR 删除失败"; return 1; }
   manual_del "$n"                                # 名单里残留的手动标记一并清掉
-  rm -rf "$AUDIO_DIR/$n" 2>/dev/null             # 包内音频留档一起删
-  log "deleted: $p"
+  log "deleted: $EP"
   echo "OK deleted=$n"
 }
 
@@ -848,8 +791,6 @@ case "$1" in
   setres) cmd_setres "$2" "$3" "$4" ;;
   swap) cmd_swap "$2" ;;
   rename) cmd_rename "$2" "$3" ;;
-  audio) cmd_audio "$2" ;;
-  audioout) cmd_audioout "$2" ;;
   import) cmd_import "$2" ;;
   delete) cmd_delete "$2" ;;
   ls) cmd_ls "$2" ;;
@@ -858,5 +799,5 @@ case "$1" in
   guard) install_guard && echo "OK guard installed" ;;
   unguard) remove_guard && echo "OK guard removed" ;;
   deploy) deploy_active && echo "OK deployed" ;;
-  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|import PATH|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
+  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
 esac

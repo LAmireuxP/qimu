@@ -19,7 +19,15 @@ def parse_desc(raw):
     lines = [l.strip() for l in raw.replace('\r', '').split('\n')]
     lines = [l for l in lines if l]
     first = lines[0].split() if lines else []
-    fps = first[2] if len(first) >= 3 else '30'
+    # 标准写法 `宽 高 帧率` → 帧率在索引 2；
+    # 小米写法 `g 宽 高 偏移x 偏移y 帧率` → 帧率在索引 5。
+    # 只按标准写法取的话，g 写法的包会把「高度」当成帧率（desc 变成 宽 高 2400 这种）。
+    if first and first[0] == 'g':
+        fps = first[5] if len(first) >= 6 else '30'   # g 写法字段不全 → 按 30，别退回去取高度
+    else:
+        fps = first[2] if len(first) >= 3 else '30'
+    if not fps.isdigit():                 # 取不到/非数字就按 30
+        fps = '30'
     parts = [l for l in lines[1:] if l and l[0] in ('p', 'c')]
     return fps, parts
 
