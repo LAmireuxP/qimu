@@ -232,7 +232,8 @@
   <div class="hint">选一个视频（默认列出「下载」和「影片」），转成动画包并自动导入动画库；<br>
     其他目录点「浏览其他目录」自己翻。画质：原生分辨率满屏、JPG 高质量；<br>
     帧数上限 600 帧，长视频建议先剪短；只取画面，不带声音。<br>
-    格式需网页能解：MP4/H.264 最稳。</div>
+    格式需网页能解：MP4/H.264 最稳。<br>
+    再点一次「视频转换」收起，收起后再点回到上次浏览的目录。</div>
 </div>
 
 <div id="toast"></div>
@@ -1002,6 +1003,7 @@
       const r = await ctl("import", tmp);
       await run(`rm -f ${quote(tmp)}`);
       if (!/OK /.test(r)) throw new Error(friendly(r));
+      onProg("导入完成", 100);   // 之前只发到 99% 就 return，进度行一直卡在「导入动画库…（99%）」
       return { stored: (/stored=(\S+)/.exec(r) || [])[1] || "", frames: frameCount, fps: fpsEff };
     } finally {
       URL.revokeObjectURL(url);
@@ -1010,6 +1012,7 @@
 
   async function openVid() {
     $("vid-card").style.display = "";
+    $("btn-vid").textContent = "收起列表";   // 和「选择文件」一致：展开时按钮变「收起列表」
     $("vid-cfg").style.display = "none";
     $("vid-prog").textContent = "";
     if (vidBrowse) return vidBrowseDir(vidBrowse);      // 上次浏览到哪就回到哪
@@ -1205,6 +1208,7 @@
   });
   $("btn-refresh").onclick = () => withBusy(refresh);
   // 「选择文件」是开关：再点一次收起列表，收起后再点从「下载」目录重新开始
+  // 与「视频转换」互斥：开一个就收起另一个，两个按钮的收起/展开逻辑完全一致
   $("btn-browse").onclick = () => withBusy(async () => {
     const card = $("browse-card");
     if (card.style.display !== "none") {
@@ -1212,11 +1216,20 @@
       $("btn-browse").textContent = "选择文件";
       return;
     }
+    $("vid-card").style.display = "none";
+    $("btn-vid").textContent = "视频转换";
     await browse("/sdcard/Download");
   });
+  // 「视频转换」是开关：再点一次收起列表，收起后再点回到上次浏览的目录
   $("btn-vid").onclick = () => withBusy(async () => {
     const card = $("vid-card");
-    if (card.style.display !== "none") { card.style.display = "none"; return; }
+    if (card.style.display !== "none") {
+      card.style.display = "none";
+      $("btn-vid").textContent = "视频转换";
+      return;
+    }
+    $("browse-card").style.display = "none";
+    $("btn-browse").textContent = "选择文件";
     await openVid();
   });
   $("vid-loop").addEventListener("click", e => {
@@ -1244,6 +1257,7 @@
       $("vid-prog").textContent = txt + (pct != null ? `（${pct}%）` : "");
     });
     toast(`转换完成：${res.frames} 帧 ${res.fps}fps，已导入 ${res.stored}，重启生效`, "ok");
+    $("vid-prog").textContent = "";   // 清掉进度残影，不再卡在「导入动画库…（99%）」
     await refresh();
   });
 
