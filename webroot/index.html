@@ -579,9 +579,14 @@
     }
 
     $("cur-name").textContent = props.active || "无";
-    $("cur-meta").textContent = props.theme_ok === "yes"
-      ? "已写入主题路径，重启生效 · " + bytes(props.theme_size)
-      : "还没写入，切个动画就会写";
+    // 「不播放动画」是一个真实的库条目：theme_ok 会是 no（没刷主题文件），
+    // 但这不是「还没写入」——按 noanim 单独说，否则用户以为关闭没生效
+    const noanim = props.noanim === "yes" || props.active === "不播放动画";
+    $("cur-meta").textContent = noanim
+      ? "已关闭开机动画：开机会直接进系统（库里的动画都还在）"
+      : props.theme_ok === "yes"
+        ? "已写入主题路径，重启生效 · " + bytes(props.theme_size)
+        : "还没写入，切个动画就会写";
 
     // 文件位置：当前动画在库里的源文件 + 刷入的主题路径 + 本机屏幕分辨率
     const ap = props.active_path || "";
@@ -710,7 +715,9 @@
     box.innerHTML = "";
 
     // 上一级（走到允许的根就不再给）
-    const atRoot = ["/", "/sdcard", "/storage", "/data/local/tmp", "/mnt/media_rw"].indexOf(path) >= 0;
+    // 存储卡挂在 /mnt/media_rw/<卷ID>，这些子目录也算根（再往上只会回到 /mnt/media_rw）
+    const atRoot = ["/", "/sdcard", "/storage", "/data/local/tmp", "/mnt/media_rw"].indexOf(path) >= 0
+      || /^\/mnt\/media_rw\/[^/]+$/.test(path);
     if (!atRoot) {
       const up = document.createElement("div");
       up.className = "row";
@@ -1000,7 +1007,9 @@
         if (p !== lastP) { lastP = p; onProg(`写回 ${Math.round((d / t) * 100)}%`, p); }
       });
       onProg("导入动画库…", 99);
-      const r = await ctl("import", tmp);
+      // 名字显式传：临时文件名只是载体，别让它决定库里的动画名
+      const animName = zipName.replace(/\.zip$/i, "") || "视频转动画";
+      const r = await ctl("import", tmp, animName);
       await run(`rm -f ${quote(tmp)}`);
       if (!/OK /.test(r)) throw new Error(friendly(r));
       onProg("导入完成", 100);   // 之前只发到 99% 就 return，进度行一直卡在「导入动画库…（99%）」
@@ -1102,6 +1111,14 @@
 
   function closeRes() { $("res-mask").style.display = "none"; $("res-card").style.display = "none"; resCtx = null; }
 
+  // 改分辨率/改名之后列表会重排，编号跟着变。按名字把编辑对象重新对上，
+  // 否则下一次点「自适应 / 交换 / 设置」会作用到隔壁那个动画上。
+  function resSyncIdx() {
+    if (!resCtx) return;
+    const row = Array.from(document.querySelectorAll("#library .row")).find(x => x.dataset.name === resCtx.name);
+    if (row) resCtx.idx = row.dataset.idx;
+  }
+
   $("btn-res-close").onclick = closeRes;
   $("res-mask").onclick = closeRes;               // 点遮罩也能关
 
@@ -1130,8 +1147,10 @@
     if (!resCtx) return;
     const r = await ctl("fit", resCtx.idx);
     if (/OK /.test(r)) {
+      await refresh();
+      resSyncIdx();
       if (!applyResFromOk(r)) await openRes(resCtx.idx, resCtx.name);
-      toast("已适配到本机屏幕", "ok"); await refresh();
+      toast("已适配到本机屏幕", "ok");
     }
     else toast(friendly(r), "err");
   });
@@ -1141,8 +1160,10 @@
     if (!resCtx) return;
     const r = await ctl("swap", resCtx.idx);
     if (/OK /.test(r)) {
+      await refresh();
+      resSyncIdx();
       if (!applyResFromOk(r)) await openRes(resCtx.idx, resCtx.name);
-      toast("已交换宽高", "ok"); await refresh();
+      toast("已交换宽高", "ok");
     }
     else toast(friendly(r), "err");
   });
@@ -1157,8 +1178,10 @@
     if (+w < 100 || +w > 16384 || +h < 100 || +h > 16384) { toast("宽高得在 100-16384 之间", "err"); return; }
     const r = await ctl("setres", resCtx.idx, w, h);
     if (/OK /.test(r)) {
+      await refresh();
+      resSyncIdx();
       if (!applyResFromOk(r)) await openRes(resCtx.idx, resCtx.name);
-      toast("已设为 " + w + "×" + h, "ok"); await refresh();
+      toast("已设为 " + w + "×" + h, "ok");
     }
     else toast(friendly(r), "err");
   });
