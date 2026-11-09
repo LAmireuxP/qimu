@@ -72,6 +72,15 @@ adb shell su -c "strings /system/lib64/libbootanimation_preapex.so | grep theme/
 
 ## 其他
 
+打包（仓库里改完自己出一版可刷的 zip）：
+
+```
+python tools/pack.py          # → release/qimu-<version>-<versionCode>.zip
+```
+
+脚本会把 `module.prop`、脚本、`bin/`、`webroot/`、`animations/` 和一份 Magisk 模板的 `META-INF` 一起打进去，
+`tools/` 和 README 不进包。版本号从 `module.prop` 读，不用改两处。
+
 动画包的格式要求：根目录要有 `desc.txt`（第一行是「宽 高 帧率」），整个包不能压缩（ZIP_STORED）。用 Windows 记事本改过 `desc.txt` 的包可能带隐藏字符、刷进去会黑屏——导入时启幕会检查出来并告诉你原因。
 
 有些小米系动画的 `desc.txt` 用的是小米自己的写法，标准播放器不认（直接黑屏）。启幕在导入和刷入时会自动转成标准写法，不用你管。
