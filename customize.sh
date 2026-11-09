@@ -15,15 +15,23 @@ chmod 0755 "$MODDIR"/*.sh "$MODDIR/bin/ctl.sh" 2>/dev/null
 chmod 0644 "$MODDIR/module.prop" "$MODDIR/webroot/index.html" 2>/dev/null
 
 # ---- 内置动画入库（已存在同名文件则跳过，保护用户自己的动画）----
-seeded=0
+seeded=0; kept_n=0; kept_names=""
 for f in "$MODDIR"/animations/*.zip; do
   [ -f "$f" ] || continue
   n=$(basename "$f")
   if [ ! -f "$LIB/$n" ]; then
     cp -f "$f" "$LIB/$n" 2>/dev/null && chmod 0644 "$LIB/$n" 2>/dev/null && seeded=$((seeded + 1))
+  else
+    # 同名但内容可能不同（用户改过 / 自己导入过）——不覆盖，只报出来
+    kept_n=$((kept_n + 1))
+    [ "$kept_n" -le 3 ] && kept_names="$kept_names $n"
   fi
 done
 [ "$seeded" -gt 0 ] && ui_print "- 内置动画入库：$seeded 个"
+if [ "$kept_n" -gt 0 ]; then
+  [ "$kept_n" -gt 3 ] && kept_names="$kept_names 等 $kept_n 个"
+  ui_print "- 同名动画已在库里，保留你的版本：$kept_names"
+fi
 
 count=$(ls "$LIB"/*.zip 2>/dev/null | wc -l | tr -d ' ')
 ui_print "- 当前动画库共 $count 个动画"
@@ -69,3 +77,4 @@ done
 [ "$guard_n" -gt 0 ] && ui_print "- 守卫脚本已装好（关掉模块后开机会回出厂动画）"
 
 ui_print "- 装完重启，打开模块的「设置」就是界面"
+ui_print "- 界面上能直接改分辨率（自动适配本机屏幕）、改名、拖拽排序、把手机里的视频转成动画"

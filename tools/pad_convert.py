@@ -5,12 +5,12 @@
 - desc.txt 首行改为「目标宽 目标高 <fps>」，保留原有段落定义
 - 全部条目 ZIP_STORED（bootanimation 二进制硬性要求）
 用法: python pad_convert.py <src.zip> <dst.zip> [name] [WxH]
-  WxH 缺省 1440x3120（K60 Pro）；给别的机器用传各自屏幕尺寸，如 1080x2400
+  WxH 缺省 1440x3200（K60 Pro 实测 wm size）；别的机器传各自屏幕尺寸，如 1080x2400
 """
 import sys, os, io, zipfile
 from PIL import Image
 
-W, H = 1440, 3120
+W, H = 1440, 3200
 if len(sys.argv) > 4:
     W, H = (int(x) for x in sys.argv[4].lower().split('x', 1))
 
@@ -54,7 +54,15 @@ def encode_png(im):
 
 def convert(src, dst, name=''):
     with zipfile.ZipFile(src) as zin:
-        desc = zin.read('desc.txt').decode('utf-8', 'ignore')
+        try:
+            desc = zin.read('desc.txt').decode('utf-8', 'ignore')
+        except KeyError:
+            # 模块壳包（system/media/bootanimation.zip 套一层）在这里最常见：
+            # 直接读根目录的 desc.txt 会抛 KeyError，报错得说清楚该用哪个文件
+            inner = [n for n in zin.namelist()
+                     if n.lower().endswith('bootanimation.zip') or n.lower().endswith('desc.txt')]
+            hint = ('；包里有 ' + ', '.join(inner[:3]) + '，先把它解出来再转') if inner else ''
+            sys.exit(f'根目录没有 desc.txt：{src} 不是裸的开机动画包（可能是模块壳）{hint}')
         fps, parts = parse_desc(desc)
         names = [n for n in zin.namelist() if n.strip()]
         frames = [n for n in names if n.lower().endswith(('.png', '.jpg', '.jpeg'))]

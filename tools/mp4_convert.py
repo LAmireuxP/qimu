@@ -4,7 +4,7 @@
 - desc.txt 首行「目标宽 目标高 帧率」，段落保留源段定义的思路但视频只有一段：
   默认时长 <8s 整段循环（p 0，播到系统起来为止），>=8s 播一遍（p 1）；--loop/--once 可强制
 - 全部条目 ZIP_STORED（bootanimation 硬性要求）；不带声音（只取画面）
-用法: python mp4_convert.py <in.mp4> <out.zip> [--wxh 1080x2400] [--fps 30] [--loop|--once] [--jpg]
+用法: python mp4_convert.py <in.mp4> <out.zip> [--wxh 1080x2400] [--fps 30] [--loop|--once] [--jpg] [--max-frames 900]
 依赖: pip install imageio-ffmpeg （自带静态 ffmpeg，不用手动装）
 """
 import argparse, os, re, shutil, subprocess, sys, tempfile, zipfile
@@ -46,6 +46,9 @@ def main():
     ap.add_argument("--loop", action="store_true", help="整段循环（p 0，播到系统启动完成）")
     ap.add_argument("--once", action="store_true", help="只播一遍（p 1）")
     ap.add_argument("--jpg", action="store_true", help="帧存 JPG（体积小解码快；缺省 PNG 无损）")
+    # 900 帧 ≈ 30fps 下 30 秒。开机动画每帧都要整帧解码，帧再多包大、开机也慢，
+    # 超过就当场中止，别等打完几百 MB 才后悔。0 = 不限制。
+    ap.add_argument("--max-frames", type=int, default=900, help="帧数上限，超出直接中止；0 = 不限制（缺省 900）")
     args = ap.parse_args()
 
     ff = find_ffmpeg()
@@ -60,9 +63,13 @@ def main():
     print(f"源: {sw}x{sh} {src_fps:.2f}fps {dur:.1f}s")
     print(f"目标: {W}x{H} {fps_i}fps  帧数≈{n_frames}  {'循环' if loop else '播一遍'}")
 
+    # 提示走 stderr：stdout 留给「进度/结果」，脚本化调用时不会被提示行污染
+    if args.max_frames and n_frames > args.max_frames:
+        sys.exit(f"这段视频按 {fps_i}fps 会生成约 {n_frames} 帧，超过上限 {args.max_frames} 帧"
+                 f"（包会很大、开机动画播完要 {dur:.0f}s）。\n"
+                 f"先截短视频，或加 --fps 降帧率，确实要这么长就加 --max-frames {n_frames}（0 = 不限制）。")
     if n_frames > 900:
-        print(f"⚠ 这段视频会生成约 {n_frames} 帧，包会很大、开机动画播完要 {dur:.0f}s。"
-              f"建议先用剪辑软件截短，或加 --fps 降低帧率。仍继续执行。")
+        print(f"警告：约 {n_frames} 帧，包会很大、开机动画播完要 {dur:.0f}s。", file=sys.stderr)
 
     tmp = tempfile.mkdtemp(prefix="mp4anim_")
     try:

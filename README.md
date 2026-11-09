@@ -49,7 +49,7 @@ HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` �
 
 只有两台：
 
-- Redmi K60 Pro（socrates，HyperOS 4.0 / Android 17 移植版，1440×3120，root 是 SukiSU）
+- Redmi K60 Pro（socrates，HyperOS 4.0 / Android 17 移植版，1440×3200，root 是 SukiSU）
 - Redmi K30S 至尊纪念版（apollo，HyperOS 4.0 / Android 17，1080×2400，APatch，管理器 FolkPatch）
 
 其他机器我没试过。装完重启看一眼开机动画有没有变就知道行不行，也可以跑一下看状态：
@@ -78,9 +78,13 @@ adb shell su -c "strings /system/lib64/libbootanimation_preapex.so | grep theme/
 
 分辨率会自动适配：动画刷入时自动改成你屏幕的分辨率——比屏幕小会黑边、比屏幕大会被裁掉，适配后就满屏；方向也会自动识别，不会出现画面颠倒。在界面里手动调过分辨率（或点过「交换宽高」）的动画，之后刷入都按你手动设的来；想恢复自动适配，再点一次「自适应屏幕」就行。
 
+屏幕尺寸读一次就缓存在 `state/screen.txt`：post-fs-data 阶段 window 服务还没起来，读不到就先用手里的缓存值；late_start 的 `sync` 会强制重读真实尺寸并刷新缓存，所以换机器、改 DPI 之后重启一次就对新尺寸。
+
 界面「当前动画」那栏会显示这个动画的来源文件路径、刷入位置和你的屏幕分辨率，能看清「文件在哪、刷到哪」。
 
-动画都放在 `/data/adb/bootanims/`，生效文件是 `/data/system/theme/boots/bootanimation.zip`。想用命令行操作的话，`bin/ctl.sh` 有这些子命令：`list / status / info / select / fit / desc / setres / swap / rename / import / delete / ls / reset / order / guard / unguard / deploy`。
+动画都放在 `/data/adb/bootanims/`，生效文件是 `/data/system/theme/boots/bootanimation.zip`。想用命令行操作的话，`bin/ctl.sh` 有这些子命令：`list / status / info / select / fit / desc / setres / swap / rename / import / delete / ls / reset / order / guard / unguard / deploy / sync / gc`。
+
+`import PATH [名字]` 的第二个参数可以指定动画名，不给就用文件名；`sync` 是「强制重读屏幕 + 补部署 + 清残留」，`gc` 只清中断的导入和视频转换留下的临时文件（只动 6 小时前的）。
 
 协议 MIT。仓库里没有商业 IP 的动画：内置的「不播放动画」是一帧纯黑；演示动画是本模块用
 `tools/make_demo.py` 自己生成的（深色底 + 旋转加载环），想换配色/尺寸改参数重跑即可。
