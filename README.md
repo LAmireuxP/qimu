@@ -83,6 +83,8 @@ python tools/pack.py          # → release/qimu-<version>-<versionCode>.zip
 
 动画包的格式要求：根目录要有 `desc.txt`（第一行是「宽 高 帧率」），整个包不能压缩（ZIP_STORED）。用 Windows 记事本改过 `desc.txt` 的包可能带隐藏字符、刷进去会黑屏——导入时启幕会检查出来并告诉你原因。
 
+`desc.txt` 里每个 `p`/`c` 段后面跟的目录（`p 1 0 part0` 里的 `part0`）必须真的存在、且里面有帧。网上下的包最常见的一种坏法就是段写 `part1`、帧却在 `part0` 里——这种包能刷进去，播到那一段就是黑屏，所以导入时直接拒绝，不用等重启才发现。
+
 有些小米系动画的 `desc.txt` 用的是小米自己的写法，标准播放器不认（直接黑屏）。启幕在导入和刷入时会自动转成标准写法，不用你管。
 
 分辨率会自动适配：动画刷入时自动改成你屏幕的分辨率——比屏幕小会黑边、比屏幕大会被裁掉，适配后就满屏；方向也会自动识别，不会出现画面颠倒。在界面里手动调过分辨率（或点过「交换宽高」）的动画，之后刷入都按你手动设的来；想恢复自动适配，再点一次「自适应屏幕」就行。
@@ -91,9 +93,11 @@ python tools/pack.py          # → release/qimu-<version>-<versionCode>.zip
 
 界面「当前动画」那栏会显示这个动画的来源文件路径、刷入位置和你的屏幕分辨率，能看清「文件在哪、刷到哪」。
 
-动画都放在 `/data/adb/bootanims/`，生效文件是 `/data/system/theme/boots/bootanimation.zip`。想用命令行操作的话，`bin/ctl.sh` 有这些子命令：`list / status / info / select / fit / desc / setres / swap / rename / import / delete / ls / reset / order / guard / unguard / deploy / sync / gc`。
+界面「动画库」标题右侧显示库里有多少个动画、一共占多少空间；工具栏的「体检」会对每个包重跑一遍导入时的校验，哪个包在库里被改坏/写坏了一眼就能看见。
 
-`import PATH [名字]` 的第二个参数可以指定动画名，不给就用文件名；`sync` 是「强制重读屏幕 + 补部署 + 清残留」，`gc` 只清中断的导入和视频转换留下的临时文件（只动 6 小时前的）。
+动画都放在 `/data/adb/bootanims/`，生效文件是 `/data/system/theme/boots/bootanimation.zip`。想用命令行操作的话，`bin/ctl.sh` 有这些子命令：`list / status / info / select / fit / desc / setres / swap / rename / import / export / delete / ls / reset / order / guard / unguard / deploy / check / sync / gc`。
+
+`import PATH [名字]` 的第二个参数可以指定动画名，不给就用文件名；`export N [路径]` 把库里的原包复制出来（不发路径就存到 `/sdcard/Download`，方便发给别人）；`check` 是全库体检；`sync` 是「强制重读屏幕 + 补部署 + 清残留」，`gc` 只清中断的导入和视频转换留下的临时文件（只动 6 小时前的）。
 
 协议 MIT。仓库里没有商业 IP 的动画：内置的「不播放动画」是一帧纯黑；演示动画是本模块用
 `tools/make_demo.py` 自己生成的（深色底 + 旋转加载环），想换配色/尺寸改参数重跑即可。

@@ -52,7 +52,10 @@
   .sub{color:var(--sub);font-size:12.5px}
   .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;
         margin-bottom:13px;box-shadow:var(--shadow);transition:background .18s ease,border-color .18s ease}
-  .card h2{font-size:13.5px;margin:0 0 11px;color:var(--sub);font-weight:600;letter-spacing:.3px}
+  .card h2{font-size:13.5px;margin:0 0 11px;color:var(--sub);font-weight:600;letter-spacing:.3px;
+           display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+  /* 标题右侧的小字（动画库：个数 · 总占用）。不换行、不抢标题宽度 */
+  .card h2 .meta{font-size:11.5px;font-weight:400;letter-spacing:0;white-space:nowrap;flex:0 0 auto}
   .current{display:flex;align-items:center;gap:12px}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:0 0 auto;box-shadow:0 0 8px var(--ok)}
   .current .name{font-size:17px;font-weight:600;word-break:break-all}
@@ -150,7 +153,7 @@
 </div>
 
 <div class="card">
-  <h2>动画库</h2>
+  <h2>动画库 <span class="meta" id="lib-meta"></span></h2>
   <div id="library"><div class="empty">读取中…</div></div>
   <div class="hint">点「应用」换动画，重启生效；正在用的那个删不掉。<br>
     排序：按住左边的 <b>⠿</b> 拖动，或者用 <b>▲▼</b> 一格一格移。<br>
@@ -159,6 +162,7 @@
 
 <div class="toolbar">
   <button class="btn ghost" id="btn-refresh">刷新</button>
+  <button class="btn ghost" id="btn-check">体检</button>
   <button class="btn ghost" id="btn-browse">选择文件</button>
   <button class="btn ghost" id="btn-vid">视频转换</button>
 </div>
@@ -183,6 +187,7 @@
   <div class="toolbar" style="margin-top:10px;margin-bottom:0">
     <button class="btn ghost" id="btn-res-fit">自适应屏幕</button>
     <button class="btn ghost" id="btn-res-swap">交换宽高</button>
+    <button class="btn ghost" id="btn-res-export">导出</button>
   </div>
   <div class="row" style="margin-top:10px;align-items:center">
     <div class="info"><div class="nm" style="font-size:13px;font-weight:600">自定义宽高</div>
@@ -247,6 +252,7 @@
   const THEME_KEY = "bootanim_theme";
   const SYS_KEY = "bootanim_sysdark";
   const MODE_KEY = "bootanim_execmode";   // 缓存 ksu.exec 的调用形式，省掉每次开界面的探测等待
+  const NO_ANIM_NAME = "不播放动画";      // 特殊条目：选它 = 置 debug.sf.nobootanimation，改分辨率没有意义
 
   let busy = false, execMode = "sync", cbSeq = 0;
   let themeMode = "auto";
@@ -578,6 +584,10 @@
       screenW = parseInt(sa[0], 10) || screenW; screenH = parseInt(sa[1], 10) || screenH;
     }
 
+    // 动画库标题右侧：个数 · 总占用（status 一次给全，不额外 exec）
+    const libCount = parseInt(props.count, 10) || 0;
+    $("lib-meta").textContent = libCount ? (libCount + " 个 · " + bytes(props.lib_size || 0)) : "";
+
     $("cur-name").textContent = props.active || "无";
     // 「不播放动画」是一个真实的库条目：theme_ok 会是 no（没刷主题文件），
     // 但这不是「还没写入」——按 noanim 单独说，否则用户以为关闭没生效
@@ -657,13 +667,16 @@
       });
       row.appendChild(apply);
 
-      // 编辑弹窗：分辨率（自适应/交换/自定义）+ 改名
-      const res = document.createElement("button");
-      res.className = "btn ghost";
-      res.textContent = "编辑";
-      res.style.padding = "7px 8px";
-      res.onclick = () => withBusy(() => openRes(row.dataset.idx, name));
-      row.appendChild(res);
+      // 编辑弹窗：分辨率（自适应/交换/自定义）+ 改名 + 导出。
+      // 「不播放动画」是个开关式的特殊条目（不写主题路径），给它改分辨率没意义，不给编辑
+      if (name !== NO_ANIM_NAME) {
+        const res = document.createElement("button");
+        res.className = "btn ghost";
+        res.textContent = "编辑";
+        res.style.padding = "7px 8px";
+        res.onclick = () => withBusy(() => openRes(row.dataset.idx, name));
+        row.appendChild(res);
+      }
 
       if (active !== "yes") {
         const del = document.createElement("button");
@@ -999,8 +1012,9 @@
       if (!frameCount) throw new Error("没有抽到画面帧，已中止：视频可能解码异常，换个 MP4 再试");
       onProg("打包 zip…", 78);
       const zip = buildZip(parts);
-      // 临时包名带上视频名——import 用文件名当动画名，别让用户看到一串临时数字
-      const tmp = `/data/local/tmp/${zipName}`;
+      // 临时包名带上视频名——import 用文件名当动画名，别让用户看到一串临时数字。
+      // 前缀 .qimu- ：转换中途崩溃留下的残包能被 ctl.sh gc 认出来清掉（也避开目录列表）
+      const tmp = `/data/local/tmp/.qimu-${zipName}`;
       let lastP = 0;
       await writeDeviceBytes(tmp, zip, (d, t) => {
         const p = 80 + Math.round((d / t) * 18);
@@ -1071,7 +1085,7 @@
 
   /* ------------------ 分辨率调整 ------------------ */
   // 面板上下文：当前在调哪个动画（编号会随排序变，每次开面板时记下当时的编号）
-  let resCtx = null, resFps = 30, resScreen = "";
+  let resCtx = null, resFps = 30, resScreen = "", resExtra = "";
 
   async function openRes(idx, name) {
     resCtx = { idx: String(idx), name };
@@ -1087,9 +1101,12 @@
     out.split("\n").forEach(l => { const i = l.indexOf("="); if (i > 0) p[l.slice(0, i)] = l.slice(i + 1); });
     resFps = parseInt(p.desc_fps, 10) || 30;
     resScreen = p.screen && p.screen !== "未知" ? p.screen : "";
+    // 帧数/时长由 shell 数一遍（只有点开这个面板才算，不进列表路径）
+    resExtra = p.frames ? ("帧数：" + p.frames + " 帧" + (p.dur ? " · 时长约 " + p.dur : "")) : "";
     const cur = (p.desc_w && p.desc_h) ? p.desc_w + "×" + p.desc_h + " · " + resFps + "fps" : "未知";
     let info = "当前分辨率：" + cur
       + "\n适配模式：" + (p.mode === "manual" ? "手动（部署时不再自动适配，点「自适应屏幕」恢复）" : "自动（部署时适配到屏幕）");
+    if (resExtra) info += "\n" + resExtra;
     if (resScreen) info += "\n本机屏幕：" + resScreen;
     $("res-info").textContent = info;
     $("res-w").value = p.desc_w || "";
@@ -1102,6 +1119,7 @@
     const m = / to=(\d+)x(\d+)/.exec(String(r || ""));
     if (!m || !resCtx) return false;
     let info = "当前分辨率：" + m[1] + "×" + m[2] + " · " + resFps + "fps";
+    if (resExtra) info += "\n" + resExtra;
     if (resScreen) info += "\n本机屏幕：" + resScreen;
     $("res-info").textContent = info;
     $("res-w").value = m[1];
@@ -1121,6 +1139,17 @@
 
   $("btn-res-close").onclick = closeRes;
   $("res-mask").onclick = closeRes;               // 点遮罩也能关
+
+  // 导出：把库里这份原始包复制到手机存储（发给别人 / 备份）。目标路径由 shell 选：
+  // 优先 /sdcard/Download，没有就 /sdcard；名字里的空格不能在 JS 这边按空白切
+  $("btn-res-export").onclick = () => withBusy(async () => {
+    if (!resCtx) return;
+    resSyncIdx();                                  // 排序/改名后编号会变，先按名字重新对上
+    const r = await ctl("export", resCtx.idx);
+    const line = String(r).split(/\r?\n/).find(l => l.indexOf("OK exported=") === 0);
+    if (line) toast("已导出到 " + line.slice("OK exported=".length), "ok");
+    else toast(friendly(r), "err");
+  });
 
   // 改名：库文件、手动名单、生效记录一起联动（shell 端 rename 命令处理）
   $("btn-res-rename").onclick = () => withBusy(async () => {
@@ -1230,6 +1259,17 @@
     if (b) setThemeMode(b.dataset.mode);
   });
   $("btn-refresh").onclick = () => withBusy(refresh);
+  // 全库体检：对库里每个包重跑一遍导入时的校验（包在库里可能被改坏/写坏，刷进去才发现是黑屏）
+  $("btn-check").onclick = () => withBusy(async () => {
+    const raw = String(await ctl("check")).replace(/\r\n/g, "\n");
+    const m = /checked=(\d+) bad=(\d+)/.exec(raw);
+    if (!m) { toast(friendly(raw), "err"); return; }
+    if (m[2] === "0") { toast("体检通过：" + m[1] + " 个包都能正常播放", "ok"); return; }
+    // 只报第一处：toast 宽度有限；完整清单看命令行 ctl.sh check
+    const firstBad = raw.split("\n").filter(l => l.indexOf("BAD\t") === 0)[0] || "";
+    const detail = firstBad ? firstBad.split("\t").slice(1).join("：") : "";
+    toast(m[2] + " 个包有问题" + (detail ? "，例如 " + detail : ""), "err");
+  });
   // 「选择文件」是开关：再点一次收起列表，收起后再点从「下载」目录重新开始
   // 与「视频转换」互斥：开一个就收起另一个，两个按钮的收起/展开逻辑完全一致
   $("btn-browse").onclick = () => withBusy(async () => {

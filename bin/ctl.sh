@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # 开机动画管理器 - 控制脚本
-# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|sync|gc}
+# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|export N 路径|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|check|sync|gc}
 #
 # 几处踩过坑的地方，改的时候注意：
 #   - 动画库列表每次运行只枚举一次，order.txt 一次读进来用纯 shell 比较，
@@ -71,6 +71,20 @@ file_size() {
   fs_s=$(wc -c <"$1" 2>/dev/null) || { echo ""; return 0; }
   set -- $fs_s                                   # 按空白拆分，替代 tr -d ' '
   echo "${1:-}"
+}
+
+# 数一个包的帧数：输入是 `unzip -l` 的整段输出，结果放 FRAMES（不 fork、不 echo）。
+# 判据只看条目名最后一列有没有「目录/xxx.(png|jpg|jpeg|webp)」——unzip -l 的列宽因实现而异，
+# 只有「最后一列是路径」这一点各家一致（Info-ZIP 和 toybox 都是）。
+count_frames() {
+  cf_n=0; cf_rest="$1$NL"
+  while [ -n "$cf_rest" ]; do
+    cf_l=${cf_rest%%"$NL"*}; [ "$cf_l" = "$cf_rest" ] && cf_rest="" || cf_rest=${cf_rest#"$cf_l"$NL}
+    case "${cf_l##* }" in
+      */*.png|*/*.PNG|*/*.jpg|*/*.JPG|*/*.jpeg|*/*.JPEG|*/*.webp|*/*.WEBP) cf_n=$((cf_n + 1)) ;;
+    esac
+  done
+  FRAMES=$cf_n
 }
 
 # 清理会被列表/模式匹配弄坏的名字（导入、改名时调用）
@@ -160,14 +174,43 @@ validate_zip() {
 
   # 一帧都没有的包（只有 desc.txt）必然黑屏，导入阶段就拦掉
   v_list=$(unzip -l "$vf" 2>/dev/null)
-  v_frames=0; v_rest="$v_list$NL"
-  while [ -n "$v_rest" ]; do
-    v_l=${v_rest%%"$NL"*}; [ "$v_l" = "$v_rest" ] && v_rest="" || v_rest=${v_rest#"$v_l"$NL}
-    case "${v_l##* }" in
-      */*.png|*/*.PNG|*/*.jpg|*/*.JPG|*/*.jpeg|*/*.JPEG|*/*.webp|*/*.WEBP) v_frames=$((v_frames + 1)) ;;
-    esac
-  done
+  count_frames "$v_list"; v_frames=$FRAMES
   [ "$v_frames" -gt 0 ] || { VALID_MSG="包里没有帧图片（只有 desc.txt，开机会黑屏）"; return 1; }
+
+  # 段落校验：desc 里每个 p/c 段引用的目录必须真实存在、且至少有一帧。
+  # 以前只数「整包有没有图片」——desc 写 `p 1 0 part1` 而帧在 part0 里，校验照样过，
+  # 刷进去就是一段黑屏。这是从网上下载的包里最常见的坏法之一，导入阶段就该拦住。
+  v_desc=$(unzip -p "$vf" desc.txt 2>/dev/null)
+  v_badpart=""; v_seen_first=0
+  while IFS= read -r v_dl || [ -n "$v_dl" ]; do
+    v_dl=${v_dl%"$CR"}
+    [ "$v_seen_first" = "1" ] || { v_seen_first=1; continue; }   # 首行是宽高，不是段落
+    set -- $v_dl
+    case "${1:-}" in
+      p|c|P|C)
+        v_dir=""
+        case "$#" in
+          4) v_dir=$4 ;;                 # p 1 0 part0
+          3) v_dir=$3 ;;                 # 少数包省掉 pause 字段
+        esac
+        [ -n "$v_dir" ] || continue
+        v_dir=${v_dir%/}
+        v_hit=0
+        v_rest2="$v_list$NL"
+        while [ -n "$v_rest2" ]; do
+          v_l2=${v_rest2%%"$NL"*}; [ "$v_l2" = "$v_rest2" ] && v_rest2="" || v_rest2=${v_rest2#"$v_l2"$NL}
+          case "${v_l2##* }" in
+            "$v_dir"/*.png|"$v_dir"/*.PNG|"$v_dir"/*.jpg|"$v_dir"/*.JPG|\
+            "$v_dir"/*.jpeg|"$v_dir"/*.JPEG|"$v_dir"/*.webp|"$v_dir"/*.WEBP) v_hit=1; break ;;
+          esac
+        done
+        [ "$v_hit" = "1" ] || v_badpart="$v_badpart $v_dir"
+        ;;
+    esac
+  done <<DESC_IN
+$v_desc
+DESC_IN
+  [ -z "$v_badpart" ] || { VALID_MSG="desc 里的段落目录不存在或没有帧：$v_badpart（开机会黑屏）"; return 1; }
 
   # 兜底全量检查：若该 unzip 的 -v 会打印方法名，出现压缩方法名即拒绝（覆盖混合压缩包）
   if unzip -v "$vf" 2>/dev/null | grep -qE 'Defl|DefN|BZip2|LZMA|Zstd'; then
@@ -715,6 +758,9 @@ cmd_status() {
   echo "library=$LIB_DIR"
   echo "screen=$(screen_size)"
   echo "count=$(entry_count)"
+  # 动画库总占用：一次 wc -c 全取（多文件时最后一行是 total 汇总），awk 只取最后一行的第一列。
+  # 别对每个包 fork 一次 stat —— 12 个包就是 12 次 fork，界面每次刷新都要付这笔钱。
+  echo "lib_size=$(wc -c "$LIB_DIR"/*.zip 2>/dev/null | awk 'END{print $1+0}')"
   if [ -f "$THEME_FILE" ]; then
     echo "theme_size=$(file_size "$THEME_FILE")"
     echo "theme_ok=yes"
@@ -788,6 +834,14 @@ cmd_desc() {
   echo "desc_fps=$D_FPS"
   if manual_has "$(name_of "$EP")"; then echo "mode=manual"; else echo "mode=auto"; fi
   echo "screen=$(screen_size)"
+  # 帧数/时长：编辑面板里显示「这段动画播多久」。只有点开面板才算一次 unzip -l，
+  # 不进列表路径（列表每刷新一次都算就是 N 次 fork）。
+  count_frames "$(unzip -l "$EP" 2>/dev/null)"
+  echo "frames=$FRAMES"
+  case "$D_FPS" in
+    ''|*[!0-9]*|0) ;;
+    *) echo "dur=$(( (FRAMES * 10 + D_FPS / 2) / D_FPS / 10 )).$(( (FRAMES * 10 + D_FPS / 2) / D_FPS % 10 ))s" ;;
+  esac
   echo "desc_line=$D_LINE"
   return 0
 }
@@ -1029,6 +1083,7 @@ cmd_order() {
 cmd_gc() {
   gc_n=0
   for gc_f in "$LIB_DIR"/.import.*.tmp "$LIB_DIR"/.unwrap.*.tmp \
+              /data/local/tmp/.qimu-*.zip \
               /data/local/tmp/*.zip.p0 /data/local/tmp/*.zip.p1 /data/local/tmp/*.zip.p2 \
               /data/local/tmp/*.zip.p3 /data/local/tmp/*.zip.p4 /data/local/tmp/*.zip.p5; do
     [ -f "$gc_f" ] || continue
@@ -1037,6 +1092,57 @@ cmd_gc() {
   done
   log "gc: removed $gc_n temp file(s)"
   echo "OK gc=$gc_n"
+}
+
+# 全库体检：对库里每个包重跑一遍 validate_zip。导入时校验过，但包在库里可能被改坏
+# （手动改 desc、同步软件写到一半、存储掉块），刷进去才发现就是重启黑屏。
+# 正常条目不出声，坏条目一行一个 BAD<tab>名字<tab>原因，最后一律给 OK 行（界面按它结算）。
+cmd_check() {
+  ck_n=0; ck_bad=0; ck_out=""
+  ck_rest=$(entry_paths)
+  while [ -n "$ck_rest" ]; do
+    ck_p=${ck_rest%%"$NL"*}; [ "$ck_p" = "$ck_rest" ] && ck_rest="" || ck_rest=${ck_rest#"$ck_p"$NL}
+    ck_n=$((ck_n + 1))
+    if validate_zip "$ck_p"; then
+      :
+    else
+      ck_bad=$((ck_bad + 1))
+      ck_out="$ck_out"BAD"$TAB$(name_of "$ck_p")$TAB$VALID_MSG$NL"
+    fi
+  done
+  [ -z "$ck_out" ] || printf '%s' "$ck_out"
+  echo "OK checked=$ck_n bad=$ck_bad"
+  return 0
+}
+
+# 导出：把库里某个动画复制到能访问的目录（发给别人 / 备份 / 拷到别的机器）。
+# 用法: export N [目标路径]
+#   目标是个已存在的目录 → 存成 <动画名>.zip；否则当成完整文件路径（父目录不存在就建）。
+#   不给目标 → 优先 /sdcard/Download。
+cmd_export() {
+  need_idx "$1" "用法: export N [目标路径]" && take_entry "$1" || return 1
+  ex_n=$(name_of "$EP")
+  ex_dst="$2"
+  if [ -z "$ex_dst" ]; then
+    if [ -d /sdcard/Download ]; then ex_dst=/sdcard/Download; else ex_dst=/sdcard; fi
+  fi
+  if [ -d "$ex_dst" ]; then
+    ex_out="${ex_dst%/}/$ex_n.zip"
+  else
+    case "$ex_dst" in
+      */) echo "ERROR 目录不存在：$ex_dst"; return 1 ;;
+    esac
+    ex_out="$ex_dst"
+  fi
+  [ "$ex_out" = "$EP" ] && { echo "ERROR 目标就是库里的文件本身"; return 1; }
+  case "$ex_out" in
+    */*) mkdir -p "${ex_out%/*}" 2>/dev/null ;;
+  esac
+  cp -f "$EP" "$ex_out" 2>/dev/null || { echo "ERROR 写入失败：$ex_out"; return 1; }
+  chmod 0644 "$ex_out" 2>/dev/null
+  log "export: $EP -> $ex_out"
+  echo "OK exported=$ex_out"
+  return 0
 }
 
 # 开机后（late_start）补一轮：主题引擎清掉的文件补写回来，并补做 post-fs-data 阶段
@@ -1071,7 +1177,9 @@ case "$1" in
   guard) install_guard && echo "OK guard installed" ;;
   unguard) remove_guard && echo "OK guard removed" ;;
   deploy) deploy_active && echo "OK deployed" ;;
+  check) cmd_check ;;
+  export) cmd_export "$2" "$3" ;;
   sync) cmd_sync ;;
   gc) cmd_gc ;;
-  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH [名字]|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|sync|gc}"; exit 64 ;;
+  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH [名字]|export N [路径]|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|check|sync|gc}"; exit 64 ;;
 esac
