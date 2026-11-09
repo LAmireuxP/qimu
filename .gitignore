@@ -24,3 +24,5 @@ ps.png
 ps2.png
 webroot/_test.html
 webroot/vid_test.mp4
+# 预览抽帧目录（运行时生成，关面板即删）
+webroot/_preview/

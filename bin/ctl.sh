@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # 开机动画管理器 - 控制脚本
-# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|export N 路径|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|check|sync|gc}
+# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|export N 路径|preview N|previewclean|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|check|sync|gc}
 #
 # 几处踩过坑的地方，改的时候注意：
 #   - 动画库列表每次运行只枚举一次，order.txt 一次读进来用纯 shell 比较，
@@ -41,6 +41,13 @@ ORDER_FILE="$STATE_DIR/order.txt"
 # 手动分辨率名单：在界面/命令里 setres、swap 设过的动画记在这里，
 # 部署/导入时的自动适配跳过它们（否则一部署就被「适配到屏幕」覆盖回去，手动调的等于白调）
 MANUAL_FILE="$STATE_DIR/manual.txt"
+# 预览用的抽帧目录。必须在 webroot 下面：界面是 KernelSU WebUI 从 webroot 静态提供的，
+# 别的目录里的文件网页根本取不到。名字带下划线，和界面资源区分开，pack.py 打模块包时会跳过。
+PREVIEW_DIR=${QIMU_PREVIEW_DIR:-$MODDIR/webroot/_preview}
+# 一次预览最多抽多少帧。帧数越多越接近原片，但解压出来的图也越大（一帧 1080p PNG
+# 常见 0.3~1.5MB）；24 帧在「看得清动作」和「不占多少存储」之间够用，界面播放时
+# 还会按 stride 把帧间隔补回去，总时长跟原动画一致
+PREVIEW_MAX=${QIMU_PREVIEW_MAX:-24}
 
 # fit_zip 算好后把「目标宽 高」放这里，供 cmd_fit 汇报用
 FIT_TW=""; FIT_TH=""
@@ -1090,6 +1097,11 @@ cmd_gc() {
     [ -n "$(find "$gc_f" -mmin +360 2>/dev/null)" ] || continue
     rm -f "$gc_f" 2>/dev/null && gc_n=$((gc_n + 1))
   done
+  # 预览抽出来的帧：界面关面板时会自己清，这里兜底清掉界面崩溃/进程被杀留下的那种。
+  # 不按时间判断——预览随时可以重建，留着只占地方。
+  if [ -d "$PREVIEW_DIR" ]; then
+    rm -rf "$PREVIEW_DIR" 2>/dev/null && gc_n=$((gc_n + 1))
+  fi
   log "gc: removed $gc_n temp file(s)"
   echo "OK gc=$gc_n"
 }
@@ -1145,6 +1157,143 @@ cmd_export() {
   return 0
 }
 
+# 预览：不刷主题路径、不重启，把包里的帧抽一部分到 webroot/_preview/，
+# 界面按 desc 里的帧率/循环/停顿在 <canvas> 上播一遍。
+# 抽帧规则：总帧数超过 PREVIEW_MAX 就等间隔抽（stride），段与段的边界不动，
+# 播放端每帧按 stride/fps 的时长走 —— 动作快慢与原片一致，只是少了中间帧。
+# 输出是可解析的清单（界面按行读，别改字段名）：
+#   OK preview=<名字>
+#   w= / h= / fps= / stride= / frames=
+#   img=<文件名>                 每个文件一行，顺序就是播放顺序
+#   seg=<p|c>,<循环>,<停顿秒>,<起始帧号>,<帧数>
+cmd_preview() {
+  need_idx "$1" "用法: preview N" && take_entry "$1" || return 1
+  pv_name=$(name_of "$EP")
+  command -v unzip >/dev/null 2>&1 || { echo "ERROR 本机没有 unzip，没法抽帧"; return 1; }
+  pv_list=$(unzip -l "$EP" 2>/dev/null)
+  [ -n "$pv_list" ] || { echo "ERROR 读不了这个包的目录（zip 可能坏了）"; return 1; }
+  pv_desc=$(unzip -p "$EP" desc.txt 2>/dev/null)
+  [ -n "$pv_desc" ] || { echo "ERROR 包里没有 desc.txt"; return 1; }
+
+  # 首行 = 宽 高 帧率，其余 p/c 行 = 段落。空行和 # 注释跳过
+  pv_parts=""; pv_seen=0
+  while IFS= read -r pv_l || [ -n "$pv_l" ]; do
+    pv_l=${pv_l%"$CR"}
+    set -- $pv_l
+    case "${1:-}" in ''|'#'*) continue ;; esac
+    if [ "$pv_seen" = "0" ]; then
+      pv_seen=1
+      parse_desc_line "$pv_l" || { echo "ERROR desc 首行不是「宽 高 帧率」格式"; return 1; }
+      continue
+    fi
+    case "${1:-}" in p|c|P|C) ;; *) continue ;; esac
+    case "$#" in
+      4) pv_dir=$4; pv_pause=$3; pv_loop=$2 ;;     # p 1 0 part0
+      3) pv_dir=$3; pv_pause=0; pv_loop=$2 ;;      # 少数包省掉 pause
+      *) continue ;;
+    esac
+    case "$pv_loop" in ''|*[!0-9]*) pv_loop=1 ;; esac
+    case "$pv_pause" in ''|*[!0-9]*) pv_pause=0 ;; esac
+    pv_dir=${pv_dir%/}
+    [ -n "$pv_dir" ] || continue
+    case "${1}" in P) pv_t=p ;; C) pv_t=c ;; *) pv_t=$1 ;; esac
+    pv_parts="$pv_parts$pv_t$TAB$pv_loop$TAB$pv_pause$TAB$pv_dir$NL"
+  done <<DESC_PV
+$pv_desc
+DESC_PV
+  [ -n "$pv_parts" ] || { echo "ERROR desc 里没有 p/c 段落"; return 1; }
+
+  # 每段有多少帧（纯 shell 数 unzip -l 的最后一列，与 validate_zip 同一套判据）
+  pv_total=0; pv_counts=""
+  pv_rest="$pv_parts"
+  while [ -n "$pv_rest" ]; do
+    pv_l=${pv_rest%%"$NL"*}; [ "$pv_l" = "$pv_rest" ] && pv_rest="" || pv_rest=${pv_rest#"$pv_l"$NL}
+    pv_x=${pv_l#*"$TAB"}; pv_x=${pv_x#*"$TAB"}; pv_dir=${pv_x#*"$TAB"}
+    pv_n=0; pv_rest2="$pv_list$NL"
+    while [ -n "$pv_rest2" ]; do
+      pv_e=${pv_rest2%%"$NL"*}; [ "$pv_e" = "$pv_rest2" ] && pv_rest2="" || pv_rest2=${pv_rest2#"$pv_e"$NL}
+      case "${pv_e##* }" in
+        "$pv_dir"/*.png|"$pv_dir"/*.PNG|"$pv_dir"/*.jpg|"$pv_dir"/*.JPG|\
+        "$pv_dir"/*.jpeg|"$pv_dir"/*.JPEG|"$pv_dir"/*.webp|"$pv_dir"/*.WEBP) pv_n=$((pv_n + 1)) ;;
+      esac
+    done
+    pv_counts="$pv_counts$pv_n$TAB"
+    pv_total=$((pv_total + pv_n))
+  done
+  [ "$pv_total" -gt 0 ] || { echo "ERROR 这个包没有可预览的帧"; return 1; }
+
+  pv_max=$PREVIEW_MAX
+  case "$pv_max" in ''|*[!0-9]*) pv_max=24 ;; esac
+  [ "$pv_max" -ge 1 ] || pv_max=24
+  pv_stride=$(( (pv_total + pv_max - 1) / pv_max ))
+  [ "$pv_stride" -ge 1 ] || pv_stride=1
+
+  # 上一轮的帧先清掉：同名文件如果留着，界面会拿到旧动画的画面
+  rm -rf "$PREVIEW_DIR" 2>/dev/null
+  mkdir -p "$PREVIEW_DIR" 2>/dev/null || { echo "ERROR 建不了预览目录：$PREVIEW_DIR"; return 1; }
+  chmod 0755 "$PREVIEW_DIR" 2>/dev/null
+
+  pv_seq=0; pv_segn=0; pv_imgs=""; pv_segs=""
+  set -- $pv_counts                                 # 每段的原始帧数，按段落顺序取用
+  pv_rest="$pv_parts"
+  while [ -n "$pv_rest" ]; do
+    pv_l=${pv_rest%%"$NL"*}; [ "$pv_l" = "$pv_rest" ] && pv_rest="" || pv_rest=${pv_rest#"$pv_l"$NL}
+    pv_t=${pv_l%%"$TAB"*}; pv_x=${pv_l#*"$TAB"}
+    pv_loop=${pv_x%%"$TAB"*}; pv_x=${pv_x#*"$TAB"}
+    pv_pause=${pv_x%%"$TAB"*}; pv_dir=${pv_x#*"$TAB"}
+    [ "$#" -gt 0 ] && shift                    # 丢弃这一段对应的原始帧数，只用来占位对齐
+    pv_start=$((pv_seq + 1)); pv_got=0; pv_k=0
+    pv_rest2="$pv_list$NL"
+    while [ -n "$pv_rest2" ]; do
+      pv_e=${pv_rest2%%"$NL"*}; [ "$pv_e" = "$pv_rest2" ] && pv_rest2="" || pv_rest2=${pv_rest2#"$pv_e"$NL}
+      pv_path=${pv_e##* }
+      case "$pv_path" in
+        "$pv_dir"/*.png|"$pv_dir"/*.PNG|"$pv_dir"/*.jpg|"$pv_dir"/*.JPG|\
+        "$pv_dir"/*.jpeg|"$pv_dir"/*.JPEG|"$pv_dir"/*.webp|"$pv_dir"/*.WEBP) ;;
+        *) continue ;;
+      esac
+      if [ $((pv_k % pv_stride)) -eq 0 ]; then
+        pv_seq=$((pv_seq + 1))
+        pv_ext=${pv_path##*.}
+        pv_file="f$pv_seq.$pv_ext"
+        if unzip -p "$EP" "$pv_path" >"$PREVIEW_DIR/$pv_file" 2>/dev/null \
+           && [ -s "$PREVIEW_DIR/$pv_file" ]; then
+          chmod 0644 "$PREVIEW_DIR/$pv_file" 2>/dev/null
+          pv_got=$((pv_got + 1))
+          pv_imgs="$pv_imgs""img=$pv_file$NL"
+        else
+          rm -f "$PREVIEW_DIR/$pv_file" 2>/dev/null
+          pv_seq=$((pv_seq - 1))
+        fi
+      fi
+      pv_k=$((pv_k + 1))
+    done
+    if [ "$pv_got" -gt 0 ]; then
+      pv_segs="$pv_segs""seg=$pv_t,$pv_loop,$pv_pause,$pv_start,$pv_got$NL"
+      pv_segn=$((pv_segn + 1))
+    fi
+  done
+  if [ "$pv_seq" -eq 0 ]; then
+    rm -rf "$PREVIEW_DIR" 2>/dev/null
+    echo "ERROR 帧解不出来（包里的图可能不是 PNG/JPG）"
+    return 1
+  fi
+
+  printf '%s\n' "OK preview=$pv_name"
+  printf 'w=%s\nh=%s\nfps=%s\n' "$D_W" "$D_H" "$D_FPS"
+  printf 'stride=%s\nframes=%s\n' "$pv_stride" "$pv_seq"
+  printf '%s' "$pv_imgs$pv_segs"
+  log "preview: $pv_name stride=$pv_stride frames=$pv_seq segs=$pv_segn"
+  return 0
+}
+
+# 关掉预览面板时清掉抽出来的帧（几十兆，不留在模块目录里）
+cmd_previewclean() {
+  rm -rf "$PREVIEW_DIR" 2>/dev/null
+  echo "OK cleaned"
+  return 0
+}
+
 # 开机后（late_start）补一轮：主题引擎清掉的文件补写回来，并补做 post-fs-data 阶段
 # 做不了的分辨率适配（那时 window 服务没起来）。SCREEN_FRESH=1 强制读一次真实屏幕，
 # 顺便把结果写进 screen.txt，下次开机早期就能直接用。
@@ -1179,7 +1328,9 @@ case "$1" in
   deploy) deploy_active && echo "OK deployed" ;;
   check) cmd_check ;;
   export) cmd_export "$2" "$3" ;;
+  preview) cmd_preview "$2" ;;
+  previewclean) cmd_previewclean ;;
   sync) cmd_sync ;;
   gc) cmd_gc ;;
-  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH [名字]|export N [路径]|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|check|sync|gc}"; exit 64 ;;
+  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH [名字]|export N [路径]|preview N|previewclean|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|check|sync|gc}"; exit 64 ;;
 esac

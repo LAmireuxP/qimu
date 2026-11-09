@@ -65,6 +65,13 @@
        -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
   .row.active{border-color:var(--ok);background:var(--active-bg)}
   .row .info{flex:1;min-width:0}
+  /* 窄屏放不下四个按钮时，应用/编辑/删除这组整体换到第二行，不挤名字也不出框 */
+  #library .row{flex-wrap:wrap;row-gap:7px}
+  #library .row .info{flex:1 1 120px;min-width:110px}
+  #library .row .acts{display:flex;gap:7px;flex:0 0 auto;margin-left:auto}
+  /* 自定义宽高：说明单独占一行，宽 / 高 / 应用 在下一行，窄屏不挤成一列字 */
+  #res-size{flex-wrap:wrap}
+  #res-size .info{flex:1 1 100%;min-width:0}
   .row .nm{font-weight:600;word-break:break-all;font-size:14px;line-height:1.3}
   .row .dt{color:var(--sub);font-size:11.5px;margin-top:1px}
   /* 拖拽排序手柄 */
@@ -116,6 +123,27 @@
   #res-mask{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:8;display:none}
   #res-card{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(92vw,430px);
         max-height:88vh;overflow-y:auto;z-index:9;display:none;margin:0}
+  /* 预览弹窗：黑底，跟开机时的观感一致；画面按 desc 的分辨率等比放进卡片 */
+  #pv-mask{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:10;display:none}
+  #pv-card{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(94vw,460px);
+        z-index:11;display:none;margin:0;padding:0;overflow:hidden;background:#000;
+        border:1px solid var(--line);border-radius:14px}
+  #pv-stage{position:relative;display:flex;align-items:center;justify-content:center;
+        min-height:120px;background:#000}
+  #pv-canvas{display:block;background:#000}
+  #pv-top{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:8px;
+        padding:8px 10px;color:#fff;font-size:12.5px;
+        background:linear-gradient(rgba(0,0,0,.66),rgba(0,0,0,0))}
+  #pv-title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #pv-close{border:0;width:28px;height:28px;flex:0 0 auto;border-radius:50%;font-size:13px;line-height:1;
+        background:rgba(255,255,255,.18);color:#fff;font-family:inherit}
+  #pv-bar{height:3px;background:rgba(255,255,255,.14)}
+  #pv-prog{height:100%;width:0;background:var(--accent)}
+  #pv-foot{display:flex;align-items:center;gap:9px;padding:9px 10px;background:var(--card);
+        border-top:1px solid var(--line)}
+  #pv-meta{flex:1;min-width:0;color:var(--sub);font-size:11.5px;line-height:1.5;word-break:break-all}
+  #pv-foot .btn{padding:7px 11px;font-size:12.5px}
+  .row .btn.pv{padding:7px 9px;font-size:11px;line-height:1}
   #toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%) translateY(20px);
          background:var(--toast-bg);border:1px solid var(--line);color:var(--fg);padding:11px 17px;
          border-radius:11px;font-size:13.5px;max-width:86%;opacity:0;pointer-events:none;
@@ -156,6 +184,7 @@
   <h2>动画库 <span class="meta" id="lib-meta"></span></h2>
   <div id="library"><div class="empty">读取中…</div></div>
   <div class="hint">点「应用」换动画，重启生效；正在用的那个删不掉。<br>
+    点 <b>▶</b> 先看效果，不用重启、也不用先应用。<br>
     排序：按住左边的 <b>⠿</b> 拖动，或者用 <b>▲▼</b> 一格一格移。<br>
     选「不播放动画」就是开机黑屏，直接进系统。</div>
 </div>
@@ -189,7 +218,7 @@
     <button class="btn ghost" id="btn-res-swap">交换宽高</button>
     <button class="btn ghost" id="btn-res-export">导出</button>
   </div>
-  <div class="row" style="margin-top:10px;align-items:center">
+  <div class="row" id="res-size" style="margin-top:10px;align-items:center">
     <div class="info"><div class="nm" style="font-size:13px;font-weight:600">自定义宽高</div>
       <div class="dt" style="margin-top:1px">保留原帧率，只改宽高</div></div>
     <input id="res-w" class="num" type="number" inputmode="numeric" placeholder="宽">
@@ -199,6 +228,22 @@
   </div>
   <div class="toolbar" style="margin-top:10px;margin-bottom:0">
     <button class="btn ghost" id="btn-res-close" style="flex:1">关闭</button>
+  </div>
+</div>
+
+<div id="pv-mask"></div>
+<div id="pv-card">
+  <div id="pv-stage">
+    <canvas id="pv-canvas"></canvas>
+    <div id="pv-top">
+      <span id="pv-title"></span>
+      <button type="button" id="pv-close" aria-label="关闭预览">✕</button>
+    </div>
+  </div>
+  <div id="pv-bar"><div id="pv-prog"></div></div>
+  <div id="pv-foot">
+    <div id="pv-meta">准备中…</div>
+    <button type="button" class="btn ghost" id="pv-replay">重播</button>
   </div>
 </div>
 
@@ -644,6 +689,15 @@
       left.appendChild(nmEl); left.appendChild(dtEl);
       row.appendChild(left);
 
+      // 预览：直接把库里的帧按 desc 的节奏播一遍，不写主题路径、不用重启
+      const pvBtn = document.createElement("button");
+      pvBtn.className = "btn ghost pv";
+      pvBtn.type = "button";
+      pvBtn.textContent = "▶";
+      pvBtn.title = "预览（不用重启）";
+      pvBtn.onclick = () => pvOpen(row.dataset.idx, name);
+      row.appendChild(pvBtn);
+
       // ▲▼ 保底排序（WebView 里拖拽失灵时用这个）
       const ord = document.createElement("div");
       ord.className = "ord";
@@ -655,6 +709,10 @@
       row.appendChild(ord);
       attachOrderButtons(up, down, row, box);
 
+      // 应用/编辑/删除放一组：窄屏时整组换行，不会被挤出卡片
+      const acts = document.createElement("div");
+      acts.className = "acts";
+
       const apply = document.createElement("button");
       apply.className = "btn";
       apply.textContent = active === "yes" ? "已应用" : "应用";
@@ -665,7 +723,7 @@
         if (/OK /.test(r)) { toast("已切换到 " + name + "，重启后生效", "ok"); await refresh(); }
         else toast(friendly(r), "err");
       });
-      row.appendChild(apply);
+      acts.appendChild(apply);
 
       // 编辑弹窗：分辨率（自适应/交换/自定义）+ 改名 + 导出。
       // 「不播放动画」是个开关式的特殊条目（不写主题路径），给它改分辨率没意义，不给编辑
@@ -675,7 +733,7 @@
         res.textContent = "编辑";
         res.style.padding = "7px 8px";
         res.onclick = () => withBusy(() => openRes(row.dataset.idx, name));
-        row.appendChild(res);
+        acts.appendChild(res);
       }
 
       if (active !== "yes") {
@@ -702,8 +760,9 @@
             else toast(friendly(r), "err");
           });
         };
-        row.appendChild(del);
+        acts.appendChild(del);
       }
+      row.appendChild(acts);
       box.appendChild(row);
     });
     syncOrderButtons();
@@ -1214,6 +1273,174 @@
     }
     else toast(friendly(r), "err");
   });
+
+  /* ------------------ 预览（不重启看效果） ------------------ */
+  // 后端 preview 把帧抽到 webroot/_preview/ —— 和本页面同源，能当静态文件直接取，
+  // 不用把几十兆的图片塞进 exec 的返回值里。这里按 desc 的 宽高 / 帧率 / 每段循环次数 /
+  // 段间停顿在 canvas 上播一遍：c 段拉伸铺满、p 段保比例留边，跟开机时的显示规则一致。
+  const PV_BASE = "_preview/";
+  let pvState = null;   // { thumbs, segs, fps, stride, w, h, si, rep, raf, stop, note }
+  let pvCleanP = Promise.resolve();   // 关面板触发的清理，下一次预览前必须先等它跑完
+
+  function pvClose(clean) {
+    if (pvState) { pvState.stop = true; cancelAnimationFrame(pvState.raf); pvState = null; }
+    $("pv-mask").style.display = "none";
+    $("pv-card").style.display = "none";
+    const cv = $("pv-canvas");
+    try { cv.getContext("2d").clearRect(0, 0, cv.width, cv.height); } catch (_) {}
+    // 抽出来的帧一次几十兆，关面板就删；删失败也只是留到下次开机 gc
+    if (clean) { pvCleanP = ctl("previewclean").catch(() => {}); }
+  }
+
+  // 每帧先缩到 maxW 宽再存成小画布：1080p 一帧解码后十几兆，二十多帧全留着 WebView 会
+  // 直接 OOM；缩完每帧只剩几百 K，播放还更快
+  function pvThumb(src, maxW) {
+    return new Promise((resolve, reject) => {
+      const im = new Image();
+      // 静态文件取不到时 onload/onerror 都可能不触发（WebView 被拦或路径不对），
+      // 不设超时界面会永远停在「载入帧 3/24…」
+      const tm = setTimeout(() => { im.onload = im.onerror = null; im.src = ""; reject(new Error("帧载入超时")); }, 8000);
+      im.onload = () => {
+        clearTimeout(tm);
+        const iw = im.naturalWidth || 1, ih = im.naturalHeight || 1;
+        const k = Math.min(1, maxW / iw);
+        const cv = document.createElement("canvas");
+        cv.width = Math.max(1, Math.round(iw * k));
+        cv.height = Math.max(1, Math.round(ih * k));
+        cv.getContext("2d").drawImage(im, 0, 0, cv.width, cv.height);
+        resolve(cv);
+      };
+      im.onerror = () => { clearTimeout(tm); reject(new Error("帧读不出来")); };
+      im.src = src;
+    });
+  }
+
+  function pvMeta() {
+    const st = pvState;
+    if (!st) return;
+    const seg = st.segs[st.si] || st.segs[0];
+    const loopText = seg.loop === 0 ? "无限循环" : ("第 " + (st.rep + 1) + "/" + seg.loop + " 遍");
+    $("pv-meta").textContent = st.w + "×" + st.h + " · " + st.fps + "fps · " + st.thumbs.length + " 帧"
+      + (st.stride > 1 ? "（每 " + st.stride + " 帧取 1）" : "")
+      + " · 第 " + (st.si + 1) + "/" + st.segs.length + " 段 " + loopText + (st.note || "");
+  }
+
+  function pvPlay(st) {
+    if (st.raf) cancelAnimationFrame(st.raf);   // 重播/重复调用时先掐掉上一条播放链
+    const cv = $("pv-canvas"), ctx = cv.getContext("2d");
+    const aw = st.w || 1080, ah = st.h || 2400;
+    // 画面按屏幕可用空间等比缩放，再乘 dpr 保证清晰；窗口太矮时先保宽度
+    const availW = Math.min(window.innerWidth * 0.9, 440);
+    const availH = Math.min(window.innerHeight * 0.56, 620);
+    const k = Math.min(availW / aw, availH / ah);
+    const cssW = Math.max(80, Math.round(aw * k)), cssH = Math.max(80, Math.round(ah * k));
+    cv.style.width = cssW + "px"; cv.style.height = cssH + "px";
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(cssW * dpr); cv.height = Math.round(cssH * dpr);
+    const W = cv.width, H = cv.height;
+    const fd = Math.max(16, (st.stride / st.fps) * 1000);   // 一张抽出来的帧顶多长时间
+
+    st.si = 0; st.rep = 0; st.stop = false;
+    let t0 = performance.now(), phase = "play", pauseUntil = 0, drawn = -1;
+
+    function drawSeg(seg, i) {
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, W, H);
+      const c = st.thumbs[seg.start - 1 + i];
+      if (!c) return;
+      const kk = seg.type === "c" ? Math.max(W / c.width, H / c.height) : Math.min(W / c.width, H / c.height);
+      const dw = c.width * kk, dh = c.height * kk;
+      ctx.drawImage(c, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    }
+
+    function nextRep() {
+      st.rep++;
+      const seg = st.segs[st.si];
+      // loop=0 是「一直播」：真实开机时后面那些段根本不会轮到，这里也一样
+      if (seg.loop !== 0 && st.rep >= seg.loop) {
+        st.rep = 0;
+        st.si++;
+        if (st.si >= st.segs.length) st.si = 0;   // 整条播完从头再来，预览一直转
+      }
+      t0 = performance.now(); phase = "play"; drawn = -1;
+      pvMeta();
+    }
+
+    function tick(now) {
+      if (st.stop) return;
+      const seg = st.segs[st.si];
+      if (phase === "pause") {
+        if (now >= pauseUntil) nextRep();
+        st.raf = requestAnimationFrame(tick);
+        return;
+      }
+      const idx = Math.floor((now - t0) / fd);
+      if (idx >= seg.count) {
+        // desc 里的 pause 是「本段播完后停多久」，黑屏等这么久再进下一段
+        phase = "pause"; pauseUntil = now + (seg.pause || 0) * 1000; drawn = -1;
+        st.raf = requestAnimationFrame(tick);
+        return;
+      }
+      if (idx !== drawn) { drawSeg(seg, idx); drawn = idx; }
+      $("pv-prog").style.width = Math.min(100, ((idx + 1) / seg.count) * 100) + "%";
+      st.raf = requestAnimationFrame(tick);
+    }
+
+    pvMeta();
+    st.raf = requestAnimationFrame(tick);
+  }
+
+  async function pvOpen(idx, name) {
+    pvClose(false);
+    await pvCleanP;          // 上一次关面板的清理没跑完就抽帧，会被它删掉刚写好的文件
+    $("pv-mask").style.display = "block";
+    $("pv-card").style.display = "block";
+    $("pv-title").textContent = name;
+    $("pv-meta").textContent = "正在抽帧…";
+    $("pv-prog").style.width = "0";
+    let raw = "";
+    try { raw = String(await ctl("preview", idx)).replace(/\r\n/g, "\n"); }
+    catch (e) { $("pv-meta").textContent = e && e.message ? e.message : "预览失败"; return; }
+    if (!/^OK preview=/m.test(raw)) { $("pv-meta").textContent = friendly(raw); toast(friendly(raw), "err"); return; }
+
+    const head = {}, segs = [], imgs = [];
+    raw.split("\n").forEach(l => {
+      if (l.indexOf("seg=") === 0) {
+        const f = l.slice(4).split(",");
+        if (f.length === 5) {
+          segs.push({ type: f[0] === "c" ? "c" : "p", loop: +f[1] || 0, pause: +f[2] || 0,
+                      start: +f[3] || 1, count: +f[4] || 0 });
+        }
+      } else if (l.indexOf("img=") === 0) {
+        imgs.push(l.slice(4));
+      } else {
+        const i = l.indexOf("=");
+        if (i > 0) head[l.slice(0, i)] = l.slice(i + 1);
+      }
+    });
+    if (!segs.length || !imgs.length) { $("pv-meta").textContent = "这个包没有能播放的帧"; return; }
+    const fps = Math.min(120, Math.max(1, parseInt(head.fps, 10) || 30));
+    const stride = Math.max(1, parseInt(head.stride, 10) || 1);
+    const w = parseInt(head.w, 10) || 0, h = parseInt(head.h, 10) || 0;
+    // 帧文件名固定（f1.png…），加时间戳躲开 WebView 缓存里上一版同名的图
+    const v = "?v=" + Date.now();
+    const maxW = Math.min(400, Math.round(window.innerWidth * 0.86));
+    const thumbs = [];
+    for (let i = 0; i < imgs.length; i++) {
+      $("pv-meta").textContent = "载入帧 " + (i + 1) + "/" + imgs.length + "…";
+      $("pv-prog").style.width = Math.round((i / imgs.length) * 100) + "%";
+      try { thumbs.push(await pvThumb(PV_BASE + imgs[i] + v, maxW)); }
+      catch (_) { thumbs.push(null); }
+    }
+    $("pv-prog").style.width = "0";
+    pvState = { thumbs, segs, fps, stride, w, h, si: 0, rep: 0, raf: 0, stop: false,
+                note: name === NO_ANIM_NAME ? " · 开机直接进系统" : "" };
+    pvPlay(pvState);
+  }
+
+  $("pv-close").onclick = () => pvClose(true);
+  $("pv-mask").onclick = () => pvClose(true);
+  $("pv-replay").onclick = () => { if (pvState) pvPlay(pvState); };
 
   /* ------------------ 启动 ------------------ */
   // 确定桥的调用形式，探测结果缓存进 localStorage——async 桥的探测要等 650ms，缓存后

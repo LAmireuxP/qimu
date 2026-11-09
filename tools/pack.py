@@ -44,7 +44,11 @@ def collect():
         if p.is_dir():
             for f in sorted(p.rglob("*")):
                 if f.is_file():
-                    items.append((f.relative_to(ROOT).as_posix(), f))
+                    rel = f.relative_to(ROOT).as_posix()
+                    # 预览抽出来的帧是运行时产物（几十兆），不进模块包
+                    if rel.startswith("webroot/_preview/"):
+                        continue
+                    items.append((rel, f))
         else:
             items.append((name, p))
     return items
