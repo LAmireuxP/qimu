@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # 开机动画管理器 - 控制脚本
-# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy}
+# 用法: ctl.sh {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|sync|gc}
 #
 # 几处踩过坑的地方，改的时候注意：
 #   - 动画库列表每次运行只枚举一次，order.txt 一次读进来用纯 shell 比较，
@@ -9,16 +9,29 @@
 #     不要解析 unzip -v 的列：不同机型 unzip 实现不一样（Info-ZIP / toybox）
 #   - 别用 ${var%%|*} 这种带 | 的参数展开，Android 的 mksh 会把模式里的 | 当“或”运算符
 #   - 部署带 stamp，开机时 stamp 和大小都对得上就直接跳过，不再每次算 md5
+#   - 改 desc.txt 只能等长原地覆盖：设备上没有任何能重建 zip 的工具（没有 zip 命令），
+#     长度不够就返回「写不进去」，别想着把后面的数据整体挪一段——那会把中央目录里的
+#     所有本地头偏移全部写错，bootanimation 直接打不开包
 
-MODDIR=${0%/*}
+# MODDIR 从 $0 反推。别假设 $0 一定带 /bin/ 前缀：直接在模块目录里跑 `sh bin/ctl.sh`
+# 时 $0 是相对路径，老的 ``${MODDIR%/bin}`` 会得到空串，state/log 全写到 /var 下去。
+case "$0" in
+  */*) MODDIR=$(cd "${0%/*}" 2>/dev/null && pwd -P) ;;
+  *)   MODDIR=$(pwd -P 2>/dev/null) ;;
+esac
+[ -n "$MODDIR" ] || MODDIR=/data/adb/modules/custom_bootanimation
 MODDIR=${MODDIR%/bin}
-LIB_DIR="/data/adb/bootanims"
-STATE_DIR="$MODDIR/var/state"
-LOG_DIR="$MODDIR/var/logs"
+# 目录可用环境变量覆盖：tools/test_ctl.sh 靠它在 /data/local/tmp 下跑全套用例，默认值不变
+LIB_DIR=${QIMU_LIB_DIR:-/data/adb/bootanims}
+STATE_DIR=${QIMU_STATE_DIR:-$MODDIR/var/state}
+LOG_DIR=${QIMU_LOG_DIR:-$MODDIR/var/logs}
 SELECTED_FILE="$STATE_DIR/selected.txt"
-THEME_DIR="/data/system/theme/boots"
+THEME_DIR=${QIMU_THEME_DIR:-/data/system/theme/boots}
+# 「选择文件」能翻的目录白名单；tools/test_ctl.sh 用 QIMU_LS_ROOTS 指到沙箱
+LS_ROOTS=${QIMU_LS_ROOTS:-"/sdcard /storage /mnt/media_rw /data/local/tmp"}
 THEME_FILE="$THEME_DIR/bootanimation.zip"
 STAMP_FILE="$STATE_DIR/deployed.stamp"
+SCREEN_CACHE_FILE="$STATE_DIR/screen.txt"
 # desc 信息缓存（每行「名字/宽/高/帧率/大小」），让 cmd_list 免掉「每行 fork 一次 unzip」。
 # 新鲜度：名字集合变了（改名/删除/导入）由 cmd_list 的内容比对自动收敛；
 # 唯独 desc_replace 是等长改写、文件大小不变，只能靠它自己主动删缓存。
@@ -46,6 +59,12 @@ CR=$(printf '\r'); TAB=$(printf '\t')
 NL='
 '
 
+# 去掉行尾空格。desc.txt 的原地改写只能等长覆盖，新串比旧串短时用空格补齐，
+# 所以重新读出来的首行可能带一串尾随空格（例：「1440 3200 30      」）。
+# 比较「已经是不是目标值」必须先 trim，否则每次部署都以为还要改一遍，
+# 白白清掉 stamp、把几十兆的主题文件重拷一次。
+trim_tail() { tt="$1"; while [ "${tt% }" != "$tt" ]; do tt=${tt% }; done; printf '%s' "$tt"; }
+
 # 取不带 .zip 的动画名
 name_of() { n=${1##*/}; printf '%s\n' "${n%.zip}"; }
 file_size() {
@@ -59,15 +78,36 @@ file_size() {
 #      一个字符都不替换）。所以这里逐个字符替换。另外 / 不能被保留——它会让名字越出动画库
 #      目录（rename 传 ../x 就会写到 /data/adb/bootanims 外），一并换成 _
 sanitize_name() {
-  printf '%s' "$1" | tr -d '\t\r\n' \
-    | sed 's/\*/_/g; s/?/_/g; s/\[/_/g; s/\]/_/g; s/|/_/g; s/\\/_/g; s|/|_|g' \
-    | cut -c1-60
+  sn=$(printf '%s' "$1" | tr -d '\t\r\n' \
+    | sed 's/\*/_/g; s/?/_/g; s/\[/_/g; s/\]/_/g; s/|/_/g; s/\\/_/g; s|/|_|g')
+  utf8_clip "$sn" 180
+}
+
+# 按 UTF-8 字符边界截断到最多 $2 字节。
+# 为什么要专门写这个：toybox 的 cut -c 实际按字节切（-c 和 -b 一个实现），一个汉字 3 字节，
+# 切在第 60 字节就会得到半个汉字——文件名变成非法 UTF-8，列表经 WebView 显示再回传时
+# 对不上原名，之后改名/删除/应用全部失败，而且用户看不出原因。
+# 判据：切点后一个字节如果是续字节（0x80-0xBF），说明正好把一个字符劈开了，往回退一个字节。
+utf8_clip() {
+  uc_s="$1"; uc_max="$2"
+  uc_n=$(printf '%s' "$uc_s" | wc -c) || uc_n=0
+  set -- $uc_n; uc_n=${1:-0}
+  [ "$uc_n" -gt "$uc_max" ] || { printf '%s' "$uc_s"; return 0; }
+  uc_len=$uc_max
+  while [ "$uc_len" -gt 0 ]; do
+    uc_b=$(printf '%s' "$uc_s" | dd bs=1 skip="$uc_len" count=1 2>/dev/null | od -An -tu1)
+    set -- $uc_b
+    uc_b=${1:-256}
+    if [ "$uc_b" -ge 128 ] && [ "$uc_b" -lt 192 ]; then uc_len=$((uc_len - 1)); else break; fi
+  done
+  printf '%s' "$uc_s" | cut -b1-"$uc_len"
 }
 
 # 设置系统属性。post-fs-data 阶段（本模块 post-fs-data.sh 会走 deploy）用 setprop 会与 init
 # 互等死锁——KernelSU / Magisk 官方文档都明令「post-fs-data 用 setprop 会死锁，请改用
 # resetprop -n」。所以优先 resetprop -n（直写属性区、不经 init）；老环境没有 resetprop 才退回 setprop。
 nb_setprop() {
+  if [ "$QIMU_NO_PROP" = "1" ]; then log "setprop(skip) $1=$2"; return 0; fi
   if command -v resetprop >/dev/null 2>&1; then
     resetprop -n "$1" "$2" 2>/dev/null && return 0
   fi
@@ -82,24 +122,52 @@ VALID_MSG=""
 validate_zip() {
   vf="$1"; VALID_MSG=""
   [ -s "$vf" ] || { VALID_MSG="文件不存在或为空"; return 1; }
-  # 一次 dd+od 读本地文件头前 10 字节：偏移 0-1 是 PK 魔数（80 75），
-  # 偏移 8-9 是压缩方法（0 0 = STORED）。比原先两次 dd 少 2 次 fork
-  v_hdr=$(dd if="$vf" bs=1 count=10 2>/dev/null | od -An -tu1 2>/dev/null)
+  # 一次 dd+od 读前 4 字节：PK\x03\x04 本地文件头魔数
+  v_hdr=$(dd if="$vf" bs=1 count=4 2>/dev/null | od -An -tx1 2>/dev/null)
   set -- $v_hdr
-  [ "$1" = "80" ] && [ "$2" = "75" ] || { VALID_MSG="不是有效的 zip 文件"; return 1; }
-  # 注意 ${10} 要带花括号：$10 会被当成 ${1}0（mksh/bash 都这样）
-  [ "$9" = "0" ] && [ "${10}" = "0" ] || { VALID_MSG="动画必须是 ZIP_STORED 无压缩格式"; return 1; }
-  command -v unzip >/dev/null 2>&1 || return 0
+  [ "$1" = "50" ] && [ "$2" = "4b" ] && [ "$3" = "03" ] && [ "$4" = "04" ] \
+    || { VALID_MSG="不是有效的 zip 文件"; return 1; }
 
-  # 根目录必须有 desc.txt（用 -l 列表 + grep，不依赖任何列格式）
-  unzip -l "$vf" 2>/dev/null | grep -q 'desc\.txt' || { VALID_MSG="zip 根目录缺少 desc.txt"; return 1; }
+  # 根目录要有 desc.txt，且它自己必须是 STORED。用本地文件头定位（desc_data），
+  # 不再用 `unzip -l | grep desc.txt`——那样 part0/desc.txt 也算数，而且有多个 desc.txt
+  # 时根本不知道拿到的是哪个。顺带拿到数据区偏移，BOM 检查省一次 unzip。
+  v_region=$(desc_data "$vf") || { VALID_MSG="zip 根目录缺少 desc.txt"; return 1; }
+  set -- $v_region; v_off=$1; v_len=$2
+  [ "$v_len" -gt 0 ] || { VALID_MSG="desc.txt 是空的"; return 1; }
+
+  # desc_data 找的是「本地文件头 + 名字 desc.txt」，而嵌套包（模块壳里的
+  # bootanimation.zip）内部同样有这个头——只按头判断会把内层 desc.txt 当成外层的。
+  # 所以再用条目表确认根目录真的有 desc.txt；没有 unzip 时退回只信 desc_data。
+  if command -v unzip >/dev/null 2>&1; then
+    v_root=$(zip_root_entry "$vf" desc.txt)
+    [ -n "$v_root" ] || { VALID_MSG="zip 根目录缺少 desc.txt"; return 1; }
+  fi
 
   # desc.txt 带 UTF-8 BOM（Windows 记事本常见）会让 bootanimation 解析首行失败 → 黑屏。
   # BOM 在等长覆盖下去不掉（去掉 3 字节就得重建 zip），只能在这里明确拒绝
-  v_bom=$(unzip -p "$vf" desc.txt 2>/dev/null | dd bs=1 count=3 2>/dev/null | od -An -tx1 2>/dev/null)
+  v_bom=$(dd if="$vf" bs=1 skip="$v_off" count=3 2>/dev/null | od -An -tx1 2>/dev/null)
   set -- $v_bom
   [ "$1" = "ef" ] && [ "$2" = "bb" ] && [ "$3" = "bf" ] \
     && { VALID_MSG="desc.txt 带 UTF-8 BOM，会导致开机黑屏——请用无 BOM 的 UTF-8 重新保存"; return 1; }
+
+  command -v unzip >/dev/null 2>&1 || return 0
+
+  # 首行必须解析得出宽高。desc 格式不对的包以前能导进来，刷进去就是黑屏，
+  # 用户在导入这一步就该看到原因，而不是重启后对着一块黑屏猜
+  v_line=$(desc_line "$vf")
+  parse_desc_line "$v_line" \
+    || { VALID_MSG="desc.txt 首行不是「宽 高 帧率」格式"; return 1; }
+
+  # 一帧都没有的包（只有 desc.txt）必然黑屏，导入阶段就拦掉
+  v_list=$(unzip -l "$vf" 2>/dev/null)
+  v_frames=0; v_rest="$v_list$NL"
+  while [ -n "$v_rest" ]; do
+    v_l=${v_rest%%"$NL"*}; [ "$v_l" = "$v_rest" ] && v_rest="" || v_rest=${v_rest#"$v_l"$NL}
+    case "${v_l##* }" in
+      */*.png|*/*.PNG|*/*.jpg|*/*.JPG|*/*.jpeg|*/*.JPEG|*/*.webp|*/*.WEBP) v_frames=$((v_frames + 1)) ;;
+    esac
+  done
+  [ "$v_frames" -gt 0 ] || { VALID_MSG="包里没有帧图片（只有 desc.txt，开机会黑屏）"; return 1; }
 
   # 兜底全量检查：若该 unzip 的 -v 会打印方法名，出现压缩方法名即拒绝（覆盖混合压缩包）
   if unzip -v "$vf" 2>/dev/null | grep -qE 'Defl|DefN|BZip2|LZMA|Zstd'; then
@@ -114,6 +182,45 @@ validate_zip() {
 # 设备上没有能重建 zip 的工具（toybox/busybox 都没有 zip 子命令），新内容不能比原行长。
 # 副作用：CRC 与实际内容对不上，但 bootanim 读 STORED 条目是直接 memcpy、不校验 CRC，
 # 照常播放（真机验证过）。原地改过要清掉 stamp，否则大小没变、部署会以为「已是最新」。
+# 定位 desc.txt 的数据区，输出「偏移 长度」，失败返回 1。
+# 为什么不直接 grep 整个包找那行文字：帧是 PNG/JPG，像素数据里完全可能碰巧出现同样的
+# 字节串，先匹配到就写进图片里，包直接坏掉（CRC 也对不上）。这里只认「PK\x03\x04 +
+# 压缩方法 0 + 名字恰好是 desc.txt」的本地文件头，之后的读写都限定在它自己的数据区。
+desc_data() {
+  dd_f="$1"
+  dd_hits=$(grep -abo 'desc\.txt' "$dd_f" 2>/dev/null)
+  [ -n "$dd_hits" ] || return 1
+  dd_rest="$dd_hits$NL"
+  while [ -n "$dd_rest" ]; do
+    dd_l=${dd_rest%%"$NL"*}; [ "$dd_l" = "$dd_rest" ] && dd_rest="" || dd_rest=${dd_rest#"$dd_l"$NL}
+    dd_pos=${dd_l%%:*}
+    dd_base=$((dd_pos - 30))
+    [ "$dd_base" -ge 0 ] || continue
+    dd_sig=$(dd if="$dd_f" bs=1 skip="$dd_base" count=4 2>/dev/null | od -An -tx1)
+    set -- $dd_sig
+    [ "$1" = "50" ] && [ "$2" = "4b" ] && [ "$3" = "03" ] && [ "$4" = "04" ] || continue
+    # 本地文件头 8..31 共 24 字节：8-9 压缩方法、18-21 压缩后长度、26-27 名字长度、
+    # 28-29 扩展区长度，全部小端。
+    # 拆字段必须用 awk：POSIX sh 的 $19 会被读成「$1 跟字面量 9」（>9 的位置参数要写 ${19}），
+    # 拼出来的 "09" 进 $(( )) 还会被 bash/dash 当八进制 → 整个偏移算错（真机 mksh 同样会错）。
+    dd_m=$(dd if="$dd_f" bs=1 skip=$((dd_base + 8)) count=24 2>/dev/null \
+      | od -An -tu1 -v \
+      | awk '{ for (i = 1; i <= NF; i++) b[n++] = $i }
+             END { if (n < 24) exit 1
+                   printf "%d %d %d %d\n", b[0] + b[1] * 256, b[18] + b[19] * 256,
+                          b[20] + b[21] * 256, b[10] + b[11] * 256 + b[12] * 65536 + b[13] * 16777216 }')
+    [ -n "$dd_m" ] || continue
+    set -- $dd_m; dd_meth=$1; dd_nl=$2; dd_el=$3; dd_len=$4
+    [ "$dd_meth" = "0" ] || continue                    # desc.txt 自己必须是 STORED
+    dd_name=$(dd if="$dd_f" bs=1 skip="$dd_pos" count=8 2>/dev/null)
+    [ "$dd_name" = "desc.txt" ] || continue
+    [ "$dd_len" -gt 0 ] || continue
+    printf '%s %s\n' $((dd_base + 30 + dd_nl + dd_el)) "$dd_len"
+    return 0
+  done
+  return 1
+}
+
 # desc.txt 的第一个有效行（跳过空行和 # 注释）。只 fork 一次 unzip，行筛选用纯 shell：
 # 返回的行保持原样（仅去 \r），因为 desc_replace 要拿它在 zip 里做逐字节定位
 desc_line() {
@@ -155,13 +262,19 @@ parse_desc_line() {
 # 把 desc.txt 里的 old 这一行原地换成 new。返回 0=已改 1=出错 2=new 更长、改不了
 desc_replace() {
   dr_f="$1"; dr_old="$2"; dr_new="$3"
+  # 值已经就是目标值（旧串只是被上一次等长改写补了尾随空格）→ 不写、不动 stamp
+  [ "$(trim_tail "$dr_old")" = "$dr_new" ] && return 0
   dr_pad=$(( ${#dr_old} - ${#dr_new} ))
   [ "$dr_pad" -ge 0 ] || return 2
   dr_repl=$(printf "%s%*s" "$dr_new" "$dr_pad" "")
-  dr_g=$(grep -aboF "$dr_old" "$dr_f" 2>/dev/null) || return 1
-  dr_off=${dr_g%%:*}                             # 多处匹配时取第一处；desc 行里不会有冒号
-  [ -n "$dr_off" ] || return 1
-  if printf '%s' "$dr_repl" | dd of="$dr_f" bs=1 seek="$dr_off" conv=notrunc 2>/dev/null; then
+  dr_region=$(desc_data "$dr_f") || return 1
+  set -- $dr_region; dr_off=$1; dr_len=$2
+  # 只在 desc 数据区里找这一行；grep 输出相对偏移，加回数据区起点才是文件内绝对偏移
+  dr_hit=$(dd if="$dr_f" bs=1 skip="$dr_off" count="$dr_len" 2>/dev/null \
+    | grep -aboF -e "$dr_old" 2>/dev/null | head -1)
+  [ -n "$dr_hit" ] || return 1
+  dr_at=$(( dr_off + ${dr_hit%%:*} ))
+  if printf '%s' "$dr_repl" | dd of="$dr_f" bs=1 seek="$dr_at" conv=notrunc 2>/dev/null; then
     FIT_WROTE=1                                  # 标记 desc 被改写过，部署据此决定必须重拷
     rm -f "$STAMP_FILE" "$DESC_CACHE" 2>/dev/null  # desc 等长改写大小不变，缓存只能这样失效
     return 0
@@ -199,25 +312,81 @@ manual_del() {
   mv -f "$mn_tmp" "$MANUAL_FILE" 2>/dev/null || rm -f "$mn_tmp"
 }
 
-# 本机屏幕物理分辨率（输出「宽 高」；读不到就输出空）。只 fork 一次 wm，行解析用纯 shell
+# 在 order.txt 里把 $1 换成 $2；$2 传空就是删掉这条（改名/删除后清理）。
+# 不清理也不会出错（entry_paths 会跳过不存在的文件），但 order.txt 会越攒越长，
+# 删掉再导入同名动画时还会被塞回旧位置，用户看着像「排序自己乱了」。
+order_map() {
+  [ -s "$ORDER_FILE" ] || return 0
+  om_tmp="$STATE_DIR/.order.$$.tmp"
+  : >"$om_tmp" 2>/dev/null || return 0
+  while IFS= read -r om_l || [ -n "$om_l" ]; do
+    om_l=${om_l%"$CR"}
+    [ -n "$om_l" ] || continue
+    if [ "$om_l" = "$1" ]; then
+      [ -n "$2" ] && printf '%s\n' "$2" >>"$om_tmp"
+    else
+      printf '%s\n' "$om_l" >>"$om_tmp"
+    fi
+  done <"$ORDER_FILE"
+  mv -f "$om_tmp" "$ORDER_FILE" 2>/dev/null || rm -f "$om_tmp"
+  return 0
+}
+
+# 本机屏幕物理分辨率（输出「宽 高」；读不到就输出空）。只 fork 一次 wm，行解析用纯 shell。
+# 读到就写进 screen.txt 缓存：post-fs-data 阶段 window 服务还没起来，wm 一定失败，这时
+# 退回上次的值——否则升级后第一次开机没法适配分辨率，动画带着黑边播一整个开机过程。
+# 默认先看缓存、缓存有就不调 wm：app_process 启动一次要几百毫秒，开机关键路径上不值得花。
+# 需要确认真实值的地方（service.sh 的 sync、界面操作）把 SCREEN_FRESH 置 1。
+SCREEN_MEM=""; SCREEN_TRIED=""; SCREEN_FRESH=""
 screen_wh() {
-  scr_raw=$(wm size 2>/dev/null) || return 0
-  scr_line=""
-  while IFS= read -r scr_l; do                   # 取 Physical size 行（Override 行不要）
-    case "$scr_l" in
-      *Physical*size*) scr_line=$scr_l; break ;;
-    esac
-  done <<SCR_IN
+  if [ -n "$SCREEN_TRIED" ]; then
+    [ -n "$SCREEN_MEM" ] && printf '%s\n' "$SCREEN_MEM"
+    return 0
+  fi
+  SCREEN_TRIED=1
+  if [ -n "$QIMU_SCREEN" ]; then                          # 测试钩子：不依赖 wm
+    SCREEN_MEM="$QIMU_SCREEN"; printf '%s\n' "$SCREEN_MEM"; return 0
+  fi
+  # 缓存
+  scr_cached=""
+  if [ -s "$SCREEN_CACHE_FILE" ]; then
+    sc_l=""; IFS= read -r sc_l <"$SCREEN_CACHE_FILE" 2>/dev/null
+    sc_l=${sc_l%"$CR"}
+    set -- $sc_l
+    case "${1:-}" in ''|*[!0-9]*) ;; *) case "${2:-}" in ''|*[!0-9]*) ;; *) scr_cached="$1 $2" ;; esac ;; esac
+  fi
+  if [ -z "$scr_cached" ] || [ "$SCREEN_FRESH" = "1" ]; then
+    scr_raw=$(wm size 2>/dev/null) || scr_raw=""
+    scr_line=""
+    if [ -n "$scr_raw" ]; then
+      while IFS= read -r scr_l || [ -n "$scr_l" ]; do   # 取 Physical size 行（Override 行不要）
+        scr_l=${scr_l%"$CR"}
+        case "$scr_l" in
+          *Physical*size*) scr_line=$scr_l; break ;;
+        esac
+      done <<SCR_IN
 $scr_raw
 SCR_IN
-  [ -n "$scr_line" ] || return 0
-  scr_line=${scr_line%"$CR"}
-  scr_line=${scr_line#*:}                        # 去掉 "Physical size" 前缀
-  while :; do
-    case "$scr_line" in ' '*) scr_line=${scr_line#' '} ;; *) break ;; esac
-  done
-  set -- ${scr_line%x*} ${scr_line#*x}
-  echo "$1 $2"
+    fi
+    if [ -n "$scr_line" ]; then
+      scr_line=${scr_line#*:}                    # 去掉 "Physical size" 前缀
+      while :; do
+        case "$scr_line" in ' '*) scr_line=${scr_line#' '} ;; *) break ;; esac
+      done
+      scr_w=${scr_line%x*}; scr_h=${scr_line#*x}
+      case "$scr_w" in ''|*[!0-9]*) scr_w="" ;; esac
+      case "$scr_h" in ''|*[!0-9]*) scr_h="" ;; esac
+      if [ -n "$scr_w" ] && [ -n "$scr_h" ]; then
+        SCREEN_MEM="$scr_w $scr_h"
+        printf '%s\n' "$SCREEN_MEM" >"$SCREEN_CACHE_FILE" 2>/dev/null
+        printf '%s\n' "$SCREEN_MEM"
+        return 0
+      fi
+    fi
+  fi
+  SCREEN_MEM="$scr_cached"
+  [ -n "$SCREEN_MEM" ] && printf '%s\n' "$SCREEN_MEM"
+  return 0
 }
 
 # 小米系动画的 desc.txt 首行常写成 `g 宽 高 偏移x 偏移y 帧率`，AOSP 的 bootanimation
@@ -262,7 +431,7 @@ fit_zip() {
   fi
   FIT_TW=$tw; FIT_TH=$th
   new="$tw $th $D_FPS"
-  [ "$new" = "$line" ] && return 0                 # 已经是本机分辨率
+  [ "$new" = "$(trim_tail "$line")" ] && return 0  # 已经是本机分辨率（含带尾随空格的旧行）
   desc_replace "$fz" "$line" "$new" || return 1
   log "fitted desc: $line -> $new ($fz)"
   return 0
@@ -337,7 +506,8 @@ active_path() {
 # 必须交给一个位于模块之外、始终会运行的脚本。/data/adb/post-fs-data.d 正合适：
 # 它在 post-fs-data 阶段执行（早于 SurfaceFlinger/bootanim），且不受模块启用状态影响。
 GUARD_NAME="qimu-guard.sh"
-GUARD_DIRS="/data/adb/post-fs-data.d /data/adb/service.d"
+# 测试时可替换成沙箱目录（tools/test_ctl.sh 会带 QIMU_GUARD_DIRS），默认路径不变
+GUARD_DIRS=${QIMU_GUARD_DIRS:-"/data/adb/post-fs-data.d /data/adb/service.d"}
 
 install_guard() {
   [ -d "$MODDIR" ] || return 0
@@ -382,10 +552,25 @@ theme_own() { chown system_theme:system_theme "$1" 2>/dev/null; chmod "$2" "$1" 
 
 deploy_active() {
   ap=$(active_path)
-  if [ -z "$ap" ]; then log "deploy skipped: no active animation"; return 1; fi
+  if [ -z "$ap" ]; then
+    an=$(active_name)
+    if [ -n "$an" ]; then
+      # 选择记录还在、库里的包却没了（被文件管理器删掉/存储清理）：主题路径上那份是旧的，
+      # 留着会一直播一个已经不存在的动画，还让「当前动画」显示成正常状态 → 清掉回出厂
+      log "deploy: active '$an' missing from library, clearing theme file"
+      if [ -e "$THEME_FILE" ] || [ -L "$THEME_FILE" ]; then rm -f "$THEME_FILE" 2>/dev/null; fi
+      rm -f "$STAMP_FILE" 2>/dev/null
+    fi
+    log "deploy skipped: no active animation"
+    return 1
+  fi
   an=$(active_name)
   new_size=$(file_size "$ap")
-  stamp_val="$an:$new_size"
+  # 屏幕尺寸进 stamp：早期阶段算不出屏幕时这一项是空的，service.sh 起来后 sync 一次
+  # 会发现对不上 → 补做适配；下次开机缓存已就绪，post-fs-data 也能直接算出同样的值，
+  # 不会每次开机都重拷一遍 50MB 的动画
+  swh=$(screen_wh)
+  stamp_val="$an:$new_size:$swh"
 
   # 「不播放动画」：设 debug.sf.nobootanimation=1，让 SurfaceFlinger 不启动 bootanim 进程
   if [ "$an" = "$NO_ANIM_NAME" ]; then
@@ -411,7 +596,7 @@ deploy_active() {
   # 慢路径：先归一化 g 写法 + 适配本机分辨率（等长原地覆盖，大小不变；改过会清 stamp）
   fit_zip "$ap" >/dev/null 2>&1
   new_size=$(file_size "$ap")
-  stamp_val="$an:$new_size"
+  stamp_val="$an:$new_size:$swh"
 
   [ -d "$THEME_DIR" ] || mkdir -p "$THEME_DIR" 2>/dev/null || { log "theme dir create failed"; return 1; }
   theme_own "$THEME_DIR" 0775
@@ -521,6 +706,9 @@ cmd_list() {
 cmd_status() {
   an=$(active_name)
   echo "active=${an:-无}"
+  # 「不播放动画」走的是 debug.sf.nobootanimation，不写主题路径；界面要能区分这个状态，
+  # 不能只看 theme_ok 说「已写入，重启生效」
+  if [ "$an" = "$NO_ANIM_NAME" ]; then echo "noanim=yes"; else echo "noanim=no"; fi
   # 界面要显示「文件位置」：当前动画在库里的源文件 + 刷入的主题路径 + 本机屏幕分辨率
   echo "active_path=$(active_path)"
   echo "theme_path=$THEME_FILE"
@@ -645,6 +833,7 @@ cmd_rename() {
   mv -f "$EP" "$target" 2>/dev/null || { echo "ERROR 改名失败"; return 1; }
   chmod 0644 "$target" 2>/dev/null
   if manual_has "$oldn"; then manual_del "$oldn"; manual_add "$newn"; fi   # 手动名单跟着改名
+  order_map "$oldn" "$newn"                      # 排序位置也跟着改名，别让用户重排
   # 生效中的动画改名 → 选择记录同步改，再重新部署（stamp 里记的名字也一并更新）
   if [ "$was_active" = "yes" ]; then
     printf '%s\n' "$newn" > "$SELECTED_FILE" 2>/dev/null
@@ -667,23 +856,53 @@ cmd_swap() {
   finish_desc_change swap "$n" "${D_H}x${D_W}"
 }
 
+# 在 zip 里找「基名等于 $2」的条目，输出它在包里的完整路径。
+# 不用 `unzip -Z1`：toybox 的 unzip 不一定带 -Z；-l 最后一行最后一列就是路径，够用。
+zip_entry_named() {
+  ze_list=$(unzip -l "$1" 2>/dev/null) || return 0
+  ze_rest="$ze_list$NL"
+  while [ -n "$ze_rest" ]; do
+    ze_l=${ze_rest%%"$NL"*}; [ "$ze_l" = "$ze_rest" ] && ze_rest="" || ze_rest=${ze_rest#"$ze_l"$NL}
+    ze_p=${ze_l##* }                             # 最后一列是路径
+    [ "${ze_p##*/}" = "$2" ] && { printf '%s\n' "$ze_p"; return 0; }
+  done
+  return 0
+}
+
+# 同上，但只认根目录条目（不带 /）。desc.txt 必须落在根目录，part0/desc.txt 不算。
+zip_root_entry() {
+  zr_list=$(unzip -l "$1" 2>/dev/null) || return 0
+  zr_rest="$zr_list$NL"
+  while [ -n "$zr_rest" ]; do
+    zr_l=${zr_rest%%"$NL"*}; [ "$zr_l" = "$zr_rest" ] && zr_rest="" || zr_rest=${zr_rest#"$zr_l"$NL}
+    zr_p=${zr_l##* }
+    case "$zr_p" in */*) continue ;; esac
+    [ "$zr_p" = "$2" ] && { printf '%s\n' "$zr_p"; return 0; }
+  done
+  return 0
+}
+
 cmd_import() {
-  src="$1"
+  src="$1"; want_name="$2"
   [ -n "$src" ] || { echo "ERROR 未指定文件"; return 1; }
   [ -f "$src" ] || { echo "ERROR 找不到文件: $src"; return 1; }
 
   # 用原始文件名命名库里的动画（解包后 src 可能变成临时文件，名字得先记下来）
-  base=$(sanitize_name "$(name_of "$src")")
+  base=$(sanitize_name "${want_name:-$(name_of "$src")}")
   [ -n "$base" ] || base="imported"
 
   # 「模块壳」包：根目录没有 desc.txt，但内含 bootanimation.zip 条目
   #   （KSU/Magisk 模块式的开机动画包就是这种结构，动画被裹在一层模块里）
-  #   解出内层 bootanimation.zip 再走正常校验/入库流程
+  #   解出内层 bootanimation.zip 再走正常校验/入库流程。
+  #   判据用条目表（精确根目录名），不能用 `unzip -p ... desc.txt` 的退出码：
+  #   toybox 的 unzip 找不到条目时照样返回 0，判定会整个失效（真机踩过）。
   inner_tmp=""
-  if ! unzip -l "$src" 2>/dev/null | grep -q 'desc\.txt'; then
+  if [ -z "$(zip_root_entry "$src" desc.txt)" ]; then
+    inner_entry=$(zip_entry_named "$src" bootanimation.zip)
     inner_tmp="$LIB_DIR/.unwrap.$$.tmp"
-    if unzip -p "$src" bootanimation.zip > "$inner_tmp" 2>/dev/null && [ -s "$inner_tmp" ]; then
-      [ "$(dd if="$inner_tmp" bs=2 count=1 2>/dev/null)" = "PK" ] && { log "unwrap module wrapper: $1 -> bootanimation.zip"; src="$inner_tmp"; } || { rm -f "$inner_tmp"; inner_tmp=""; }
+    if [ -n "$inner_entry" ] && unzip -p "$src" "$inner_entry" >"$inner_tmp" 2>/dev/null && [ -s "$inner_tmp" ]; then
+      log "unwrap: $inner_entry in $src"
+      src="$inner_tmp"
     else
       rm -f "$inner_tmp" 2>/dev/null
       inner_tmp=""
@@ -720,6 +939,7 @@ cmd_delete() {
   fi
   rm -f "$EP" 2>/dev/null || { echo "ERROR 删除失败"; return 1; }
   manual_del "$n"                                # 名单里残留的手动标记一并清掉
+  order_map "$n" ""                              # 排序表里的旧条目也一起清掉
   log "deleted: $EP"
   echo "OK deleted=$n"
 }
@@ -731,26 +951,49 @@ cmd_delete() {
 cmd_ls() {
   d="$1"
   [ -n "$d" ] || d="/sdcard"
-  case "$d" in
-    /sdcard|/sdcard/*|/storage|/storage/*|/mnt/media_rw|/mnt/media_rw/*|/data/local/tmp|/data/local/tmp/*) ;;
-    *) echo "ERROR 这个路径不让浏览：$d"; return 1 ;;
+  while [ "${d%/}" != "$d" ]; do d=${d%/}; done     # 去掉末尾斜杠（/sdcard/ ≡ /sdcard）
+  [ -n "$d" ] || d="/"
+  # 白名单是按字面前缀比的，/data/local/tmp/../.. 这种也带前缀——必须先把穿越拦掉
+  case "/$d/" in
+    *"/../"*) echo "ERROR 路径里不能带 ..：$d"; return 1 ;;
   esac
-  [ -d "$d" ] || { echo "ERROR 没有这个目录：$d"; return 1; }
-  ls -1 "$d" 2>/dev/null | sort | while IFS= read -r x; do
-    [ -n "$x" ] || continue
-    case "$x" in .*) continue ;; esac
-    p="$d/$x"
-    if [ -d "$p" ]; then
-      printf 'D\t%s\t%s\n' "$x" "$p"
-    elif [ -f "$p" ]; then
-      case "$x" in
-        *.zip|*.ZIP) printf 'F\t%s\t%s\t%s\n' "$x" "$(file_size "$p")" "$p" ;;
-        # 视频文件单列一类（V），给「视频转动画」用；选择文件列表里不显示导入按钮
-        *.mp4|*.MP4|*.mov|*.MOV|*.mkv|*.MKV|*.webm|*.WEBM|*.m4v|*.M4V|*.3gp|*.3GP)
-          printf 'V\t%s\t%s\t%s\n' "$x" "$(file_size "$p")" "$p" ;;
-      esac
-    fi
+  ls_ok=no
+  for ls_r in $LS_ROOTS; do
+    [ "$d" = "$ls_r" ] && { ls_ok=yes; break; }
+    case "$d" in "$ls_r"/*) ls_ok=yes; break ;; esac
   done
+  [ "$ls_ok" = "yes" ] || { echo "ERROR 这个路径不让浏览：$d"; return 1; }
+  [ -d "$d" ] || { echo "ERROR 没有这个目录：$d"; return 1; }
+  # 一次 ls 取全量（用变量，不接管道子 shell），目录排前、文件排后，
+  # 最后整块 printf 一次——每行 fork 一次 printf 的话，50 个条目要 300ms+。
+  # ls -p 给目录加尾斜杠：省掉「每个条目一次 test -d」的 fork（50 条就是 50 次）
+  ls_all=$(ls -1p "$d" 2>/dev/null)
+  ls_out=""
+  ls_rest="$ls_all$NL"
+  while [ -n "$ls_rest" ]; do
+    ls_x=${ls_rest%%"$NL"*}; [ "$ls_x" = "$ls_rest" ] && ls_rest="" || ls_rest=${ls_rest#"$ls_x"$NL}
+    [ -n "$ls_x" ] || continue
+    case "$ls_x" in .*) continue ;; esac
+    case "$ls_x" in
+      */) ls_n=${ls_x%/}; ls_out="$ls_out"D"$TAB$ls_n$TAB$d/$ls_n$NL" ;;
+    esac
+  done
+  ls_rest="$ls_all$NL"
+  while [ -n "$ls_rest" ]; do
+    ls_x=${ls_rest%%"$NL"*}; [ "$ls_x" = "$ls_rest" ] && ls_rest="" || ls_rest=${ls_rest#"$ls_x"$NL}
+    [ -n "$ls_x" ] || continue
+    case "$ls_x" in .*) continue ;; esac
+    case "$ls_x" in */) continue ;; esac            # 目录已在上面的循环里输出过
+    ls_p="$d/$ls_x"
+    case "$ls_x" in
+      *.zip|*.ZIP)
+        ls_out="$ls_out""F$TAB$ls_x$TAB$(file_size "$ls_p")$TAB$ls_p$NL" ;;
+      # 视频文件单列一类（V），给「视频转动画」用；选择文件列表里不显示导入按钮
+      *.mp4|*.MP4|*.mov|*.MOV|*.mkv|*.MKV|*.webm|*.WEBM|*.m4v|*.M4V|*.3gp|*.3GP)
+        ls_out="$ls_out""V$TAB$ls_x$TAB$(file_size "$ls_p")$TAB$ls_p$NL" ;;
+    esac
+  done
+  printf '%s' "$ls_out"
 }
 
 cmd_reset() {
@@ -781,6 +1024,35 @@ cmd_order() {
   fi
 }
 
+# 清理中断的导入/转换残留。只清 6 小时前的：视频写回期间是 4 个分片
+# /data/local/tmp/<名>.zip.p0..p3，合并完才删，清早了会把正在跑的转换弄坏。
+cmd_gc() {
+  gc_n=0
+  for gc_f in "$LIB_DIR"/.import.*.tmp "$LIB_DIR"/.unwrap.*.tmp \
+              /data/local/tmp/*.zip.p0 /data/local/tmp/*.zip.p1 /data/local/tmp/*.zip.p2 \
+              /data/local/tmp/*.zip.p3 /data/local/tmp/*.zip.p4 /data/local/tmp/*.zip.p5; do
+    [ -f "$gc_f" ] || continue
+    [ -n "$(find "$gc_f" -mmin +360 2>/dev/null)" ] || continue
+    rm -f "$gc_f" 2>/dev/null && gc_n=$((gc_n + 1))
+  done
+  log "gc: removed $gc_n temp file(s)"
+  echo "OK gc=$gc_n"
+}
+
+# 开机后（late_start）补一轮：主题引擎清掉的文件补写回来，并补做 post-fs-data 阶段
+# 做不了的分辨率适配（那时 window 服务没起来）。SCREEN_FRESH=1 强制读一次真实屏幕，
+# 顺便把结果写进 screen.txt，下次开机早期就能直接用。
+cmd_sync() {
+  SCREEN_FRESH=1
+  if deploy_active; then
+    cmd_gc >/dev/null 2>&1
+    echo "OK synced"
+    return 0
+  fi
+  echo "ERROR sync=deploy-failed"
+  return 1
+}
+
 case "$1" in
   list) cmd_list ;;
   status) cmd_status ;;
@@ -791,7 +1063,7 @@ case "$1" in
   setres) cmd_setres "$2" "$3" "$4" ;;
   swap) cmd_swap "$2" ;;
   rename) cmd_rename "$2" "$3" ;;
-  import) cmd_import "$2" ;;
+  import) cmd_import "$2" "$3" ;;
   delete) cmd_delete "$2" ;;
   ls) cmd_ls "$2" ;;
   reset) cmd_reset ;;
@@ -799,5 +1071,7 @@ case "$1" in
   guard) install_guard && echo "OK guard installed" ;;
   unguard) remove_guard && echo "OK guard removed" ;;
   deploy) deploy_active && echo "OK deployed" ;;
-  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy}"; exit 64 ;;
+  sync) cmd_sync ;;
+  gc) cmd_gc ;;
+  *) echo "用法: $0 {list|status|info|select N|fit N|desc N|setres N W H|swap N|rename N 名字|import PATH [名字]|delete N|ls DIR|reset|order NAME...|guard|unguard|deploy|sync|gc}"; exit 64 ;;
 esac
