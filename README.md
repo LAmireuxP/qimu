@@ -1,105 +1,136 @@
-# 启幕
+# QIMU (启幕)
 
-HyperOS 的开机动画管理器，KernelSU / SukiSU / APatch / Magisk 都能用。中文界面，换动画、导入动画、删动画、把视频转成开机动画、改名字、调分辨率，或者干脆不显示动画。
+**Documentation Languages:**
+- [English (Default)](README.md)
+- [Bahasa Indonesia](README_ID.md)
+- [简体中文](README_CN.md)
 
-HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` 这一条，比 `/system/media`、`/product/media` 都靠前，所以这个模块直接往这条路径写，不用动系统分区。关掉模块或者卸载之后，下次开机会自动回到出厂的动画。
+---
 
-## 能干什么
+A boot animation manager for HyperOS, compatible with KernelSU, SukiSU, APatch, and Magisk. Features a complete multilingual interface (English, Bahasa Indonesia, Simplified Chinese) to switch animations, import packages, delete animations, convert videos into boot animations, rename items, adjust screen resolutions, or disable boot animations entirely.
 
-- 换动画：界面里点「应用」，重启生效
-- 导入自己的：zip 丢进「下载」目录，点「选择文件」自己翻到动画放的位置
-- 调顺序：按住每行左边的 ⠿ 上下拖，或者用 ▲▼ 一格一格移，松手就存
-- 不要动画：选「不播放动画」，开机黑屏直接进系统
-- 视频转动画：手机里的视频（MP4/MOV/MKV/WEBM）直接转成开机动画并导入，全程手机本地完成，不用电脑
-- 编辑动画：每个动画的「编辑」弹窗里，可以改名字、调分辨率（自适应屏幕、交换宽高或自己填）
-- 预览动画：每行前面的 ▶ 点一下就能看它播起来的样子，在弹窗里循环播放，不重启、也不用先切过去
-- 分辨率自动适配：刷入时自动改到你屏幕的尺寸，不会黑边也不会被裁掉；方向画反也能自动纠正；手动调过的动画刷入时按你设的来
-- 界面跟随系统深浅色，也可以手动固定成浅色或深色
+When loading boot animations, HyperOS checks `/data/system/theme/boots/bootanimation.zip` first, prioritizing it over `/system/media` and `/product/media`. Consequently, this module writes directly to this theme path without modifying system partitions. When the module is disabled or uninstalled, the system automatically reverts to the factory default boot animation on the next reboot.
 
-## 安装
+<p align="center">
+  <img src="assets/preview/qimu_preview_en.jpg" alt="QIMU WebUI Preview" width="380">
+</p>
 
-管理器里刷 [Releases](https://github.com/LAmireuxP/qimu/releases) 里最新的 zip，重启，再打开模块的「设置」进界面。里面自带一个「不播放动画」和一个演示动画，装完就能用；想换动画自己导入即可。升级直接刷新包，你之前选的动画和排序都会保留。
+## Features
 
-安装时会在 `/data/adb/post-fs-data.d/` 和 `/data/adb/service.d/` 各放一个 `qimu-guard.sh`。这两个目录在模块外面，作用只有一个：模块被关掉或删掉之后，把那条主题路径上的动画文件清掉，让开机动画回到出厂。卸载模块时脚本会一起删掉。
+- **Switch Animations**: Click "Apply" in the WebUI; changes take effect after rebooting.
+- **Import Custom Animations**: Place zip archives in the "Download" folder, click "Choose File", and browse to the file location to import.
+- **Custom Ordering**: Hold and drag the ⠿ handle on the left, or use the ▲▼ buttons to move items step-by-step; order changes are saved immediately upon release.
+- **Disable Boot Animation**: Select "Disable Animation" to show a clean black screen on boot and proceed straight to the system.
+- **Video to Animation**: Convert videos on your device (MP4/MOV/MKV/WEBM) directly into boot animation packages and import them, processed entirely locally on the phone without needing a PC.
+- **Edit Animations**: Open the "Edit" dialog on any animation to rename it or adjust its resolution (fit to screen, swap W/H, or enter custom width and height).
+- **Preview Animations**: Click the ▶ button in any row to preview the animation in a looping popup dialog at its actual frame rate, resolution, parts, and loop count—no reboot or prior application required.
+- **Automatic Resolution Adaptation**: Animations are automatically adapted to your device's screen dimensions upon deployment to eliminate black borders and prevent cropping; inverted orientations are automatically corrected, while manual resolution overrides are strictly respected.
+- **Theme Support**: Seamlessly follows system dark/light mode, or can be pinned manually to Light or Dark mode.
+- **Multilingual Interface (i18n)**: Full support for English (default), Bahasa Indonesia, and Simplified Chinese, switchable instantly without reloading.
 
-## 用法
+## Installation
 
-1. 进界面，点某个动画的「应用」，重启
-2. 加自己的动画：zip 得是 **ZIP_STORED 不压缩**、根目录有 `desc.txt`，点「选择文件」自己翻到它所在的位置导入。格式不对界面会告诉你原因
-3. 想用视频当开机动画：点「视频转换」，选手机里的视频（下载/影片目录，或自己翻目录）一键转换导入，不用电脑
-4. 改名字、调分辨率：点动画的「编辑」，都在弹窗里；正在用的动画改完会自动重新刷入
-5. 想看效果：点动画左边的 ▶，按它真实的帧率、分辨率、分段和循环次数播放；关掉弹窗会自动清掉临时帧
-6. 正在用哪个动画，界面里有「使用中」标记
+1. Flash the latest zip package from [Releases](https://github.com/LAmireuxP/qimu/releases) via your root manager (KernelSU / SukiSU / APatch / Magisk).
+2. Reboot the device.
+3. Open the module's "Action / Settings" in your root manager to launch the WebUI.
+4. The module comes preloaded with "Disable Animation" and a demo animation. To use custom animations, simply import your own zip files. Future updates can be flashed directly over existing installations; your selected animation and ordering will be preserved.
 
-`tools/pad_convert.py` 可以把随便一个 AOSP 格式的动画转成能用的：帧按 cover 方式缩放裁切到目标分辨率（满屏无黑边、无损 PNG）、desc 首行改成目标分辨率、强制不压缩。用之前 `pip install pillow`，目标尺寸跟在名字后面传，如 `python tools/pad_convert.py 源.zip 目标.zip 名字 1080x2400`。
+During installation, a guard script (`qimu-guard.sh`) is placed in `/data/adb/post-fs-data.d/` and `/data/adb/service.d/`. These locations reside outside the module directory for a specific safety purpose: if the module is disabled or removed, the guard script cleans up the animation file on the theme path so the device safely restores its factory boot animation. The guard scripts are automatically removed when the module is uninstalled.
 
-`tools/mp4_convert.py` 是视频转动画的电脑端版本，和模块里内置的「视频转换」效果一样，适合想批量转、或要精确控制帧率和分辨率的时候用：`pip install imageio-ffmpeg` 之后 `python tools/mp4_convert.py 视频.mp4 动画包.zip`。日常用模块界面里的「视频转换」就够了，这两个工具是备着批量处理和精细控制用的。
+## Usage
 
-## 导入哪种包
+1. Open the WebUI, click "Apply" on the desired animation, and reboot.
+2. **Adding Custom Animations**: The zip archive must be uncompressed (**ZIP_STORED**) and contain `desc.txt` in its root directory. Click "Choose File" and browse to your file to import it. If the format does not meet requirements, the UI will explain the validation failure.
+3. **Using Videos as Boot Animations**: Click "Convert Video", select a video from your device (lists Download and Movies folders by default, or browse custom directories), and convert/import it with a single click without a computer.
+4. **Renaming & Adjusting Resolution**: Click "Edit" on any animation; if the currently active animation is modified, it will be automatically redeployed.
+5. **Previewing**: Click the ▶ button on the left of any animation to preview it with its genuine frame rate, dimensions, parts, and loop settings; closing the preview dialog automatically purges temporary extracted frames.
+6. The currently active animation is clearly labeled with the "In Use" tag.
 
-网上下的「开机动画」常见两种，启幕都能吃：
+### Desktop Utilities
 
-**① 裸动画包** —— 就是 `bootanimation.zip` 本身，根目录直接是 `desc.txt` 加 `part0/` 这些帧目录。直接导入即可。
+- `tools/pad_convert.py`: Converts arbitrary AOSP-format animations into compatible packages on a computer: frames are cover-scaled/cropped to target dimensions (full-screen without black borders, lossless PNG), updates the first line of `desc.txt`, and enforces uncompressed storage. Install dependencies with `pip install pillow`, then execute: `python tools/pad_convert.py source.zip target.zip name 1080x2400`.
+- `tools/mp4_convert.py`: Desktop version of the built-in video-to-animation converter, yielding identical output for batch processing or precise frame rate and resolution tuning: install dependencies with `pip install imageio-ffmpeg`, then run: `python tools/mp4_convert.py video.mp4 animation.zip`.
 
-**② KSU/Magisk 模块包** —— 里面有 `module.prop`、`META-INF/com/google/android/update-binary`、`post-fs-data.sh`，动画被裹在里头一个 `bootanimation.zip` 里。导入时启幕会自动把内层 `bootanimation.zip` 解出来用，你不用自己拆；解出来的动画照样得过「不压缩 + 有 desc.txt」的校验，不过关会告诉你原因。
+## Supported Package Formats
 
-一眼区分：解压软件看一眼包里有什么——根目录直接看到 `desc.txt` + `part0` 就是 ①；看到 `module.prop` / `META-INF` 就是 ②。
+QIMU supports both common boot animation package formats found online:
 
-> ② 这种模块包也可以直接丢进管理器里当独立模块刷，两种方式选一种就行。注意别两种都装：都装的话启幕的会生效，模块包自己的动画不会显示。
+**① Bare Animation Package** — The standalone `bootanimation.zip` itself, where the root directory directly contains `desc.txt` along with frame folders such as `part0/`. These can be imported directly.
 
-## 测过的机器
+**② Root Module Package (KSU / Magisk)** — A module archive containing `module.prop`, `META-INF/com/google/android/update-binary`, `post-fs-data.sh`, with the animation nested inside as an internal `bootanimation.zip`. When imported, QIMU automatically extracts the nested `bootanimation.zip` without requiring manual unpacking. The extracted animation must still pass uncompressed and `desc.txt` validation checks.
 
-只有两台：
+How to tell them apart: Open the archive in a file manager or archive viewer—if the root directly displays `desc.txt` + `part0/`, it is type ①; if it shows `module.prop` and `META-INF`, it is type ②.
 
-- Redmi K60 Pro（socrates，HyperOS 4.0 / Android 17 移植版，1440×3200，root 是 SukiSU）
-- Redmi K30S 至尊纪念版（apollo，HyperOS 4.0 / Android 17，1080×2400，APatch，管理器 FolkPatch）
+> Note: Type ② module packages can also be flashed directly as standalone modules in your root manager. Choose one method; do not install both simultaneously to avoid priority conflicts.
 
-其他机器我没试过。装完重启看一眼开机动画有没有变就知道行不行，也可以跑一下看状态：
+## Tested Devices
 
-```
+The following devices have been verified and tested:
+
+- **Device:** Redmi K60 Pro (socrates)
+  - **OS:** HyperOS 4.0 / Android 17 port (1440×3200, root: SukiSU)
+  - **Status:** Tested
+- **Device:** Redmi K30S Ultra (apollo)
+  - **OS:** HyperOS 4.0 / Android 17 (1080×2400, root: APatch with FolkPatch manager)
+  - **Status:** Tested
+- **Device:** POCO X8 Pro (klee)
+  - **OS:** HyperOS 3, Android 17 (1268×2756, root: KernelSU Next)
+  - **Status:** Tested
+
+| Device | OS | Status | Notes |
+| :--- | :--- | :--- | :--- |
+| **Redmi K60 Pro** (socrates) | HyperOS 4.0 / Android 17 port | Tested | 1440×3200, root: SukiSU |
+| **Redmi K30S Ultra** (apollo) | HyperOS 4.0 / Android 17 | Tested | 1080×2400, root: APatch (FolkPatch) |
+| **POCO X8 Pro** (klee) | HyperOS 3, Android 17 | **Tested** | 1268×2756, root: KernelSU Next |
+
+To inspect module status via ADB:
+
+```bash
 adb shell su -c "/data/adb/modules/custom_bootanimation/bin/ctl.sh status"
 ```
 
-要是没反应，可能是你这台机器读开机动画的顺序不一样，不走主题路径。可以查一下：
+To verify whether your ROM reads from the theme boot animation path:
 
-```
+```bash
 adb shell su -c "strings /system/lib64/libbootanimation_preapex.so | grep theme/boots"
 ```
 
-有输出就说明走这条路径，能生效；没输出就是不适用。
+If the command produces matching output, your system supports this theme path and the module will take effect; if there is no output, this mechanism is not applicable to your ROM.
 
-## 免责
+## Disclaimer
 
-就上面两台机器测过，别的都没测，情况可能不一样。刷这个有风险，自己判断要不要用；出了问题是自己的事（开不了机、动画不正常之类），我不担责任。刷之前先备份，确认自己有救砖的办法。
+This project has only been tested on the specific configurations listed above. Situations on other ROMs and devices may vary. Modifying boot animations carries inherent system risks; proceed at your own discretion. The author assumes no liability for system anomalies or boot issues. Always take a complete backup and ensure you have recovery options (such as fastboot or custom recovery) available before flashing.
 
-## 其他
+## Technical Details & CLI
 
-打包（仓库里改完自己出一版可刷的 zip）：
+### Packaging the Module
 
-```
+To build a flashable zip archive from source:
+
+```bash
 python tools/pack.py          # → release/qimu-<version>-<versionCode>.zip
 ```
 
-脚本会把 `module.prop`、脚本、`bin/`、`webroot/`、`animations/` 和一份 Magisk 模板的 `META-INF` 一起打进去，
-`tools/` 和 README 不进包。版本号从 `module.prop` 读，不用改两处。
+The build script packages `module.prop`, shell scripts, `bin/`, `webroot/`, `animations/`, and the Magisk `META-INF` template; `tools/` and documentation files are excluded. The version number is read directly from `module.prop`.
 
-动画包的格式要求：根目录要有 `desc.txt`（第一行是「宽 高 帧率」），整个包不能压缩（ZIP_STORED）。用 Windows 记事本改过 `desc.txt` 的包可能带隐藏字符、刷进去会黑屏——导入时启幕会检查出来并告诉你原因。
+### Technical Specifications
+- **Archive Requirements**: The root must contain `desc.txt` (first line format: `width height fps`), and the entire zip must be uncompressed (ZIP_STORED). Editing `desc.txt` in standard Windows Notepad may introduce UTF-8 BOM characters that trigger a black screen on boot—QIMU automatically detects and rejects archives with BOM.
+- **Part Validation**: Every part folder specified in `p` or `c` lines of `desc.txt` (e.g. `part0` in `p 1 0 part0`) must exist and contain valid frame images inside the archive.
+- **Xiaomi Format Handling**: Custom Xiaomi-style `desc.txt` syntax is automatically normalized to standard Android format during import and deployment.
+- **Resolution Adaptation**: Animations are resized to match physical screen resolution upon deployment, with automatic orientation detection to avoid flipped screens. Manual user overrides in the WebUI take precedence over automatic scaling.
+- **Screen Dimension Cache**: Screen dimensions are cached in `state/screen.txt`. During `late_start`, the `sync` command refreshes dimensions to handle DPI changes or device swaps.
+- **Storage Paths**: Library animations are stored in `/data/adb/bootanims/`, and the active animation is deployed to `/data/system/theme/boots/bootanimation.zip`.
 
-`desc.txt` 里每个 `p`/`c` 段后面跟的目录（`p 1 0 part0` 里的 `part0`）必须真的存在、且里面有帧。网上下的包最常见的一种坏法就是段写 `part1`、帧却在 `part0` 里——这种包能刷进去，播到那一段就是黑屏，所以导入时直接拒绝，不用等重启才发现。
+### CLI Subcommands (`bin/ctl.sh`)
 
-有些小米系动画的 `desc.txt` 用的是小米自己的写法，标准播放器不认（直接黑屏）。启幕在导入和刷入时会自动转成标准写法，不用你管。
+Subcommands: `list / status / info / select / fit / desc / setres / swap / rename / import / export / delete / ls / reset / order / guard / unguard / deploy / check / sync / gc`.
 
-分辨率会自动适配：动画刷入时自动改成你屏幕的分辨率——比屏幕小会黑边、比屏幕大会被裁掉，适配后就满屏；方向也会自动识别，不会出现画面颠倒。在界面里手动调过分辨率（或点过「交换宽高」）的动画，之后刷入都按你手动设的来；想恢复自动适配，再点一次「自适应屏幕」就行。
+- `import PATH [name]`: Imports an animation, with an optional custom name as the second argument.
+- `export N [path]`: Exports an original animation archive from the library to device storage (defaults to `/sdcard/Download`).
+- `check`: Runs a health check across all library packages to ensure archive integrity.
+- `sync`: Forces screen dimension refresh, redeploys active animation if missing, and cleans residual files.
+- `gc`: Cleans up interrupted import and video conversion temporary files older than 6 hours.
 
-屏幕尺寸读一次就缓存在 `state/screen.txt`：post-fs-data 阶段 window 服务还没起来，读不到就先用手里的缓存值；late_start 的 `sync` 会强制重读真实尺寸并刷新缓存，所以换机器、改 DPI 之后重启一次就对新尺寸。
+### License & Assets
 
-界面「当前动画」那栏会显示这个动画的来源文件路径、刷入位置和你的屏幕分辨率，能看清「文件在哪、刷到哪」。
-
-界面「动画库」标题右侧显示库里有多少个动画、一共占多少空间；工具栏的「体检」会对每个包重跑一遍导入时的校验，哪个包在库里被改坏/写坏了一眼就能看见。
-
-动画都放在 `/data/adb/bootanims/`，生效文件是 `/data/system/theme/boots/bootanimation.zip`。想用命令行操作的话，`bin/ctl.sh` 有这些子命令：`list / status / info / select / fit / desc / setres / swap / rename / import / export / delete / ls / reset / order / guard / unguard / deploy / check / sync / gc`。
-
-`import PATH [名字]` 的第二个参数可以指定动画名，不给就用文件名；`export N [路径]` 把库里的原包复制出来（不发路径就存到 `/sdcard/Download`，方便发给别人）；`check` 是全库体检；`sync` 是「强制重读屏幕 + 补部署 + 清残留」，`gc` 只清中断的导入和视频转换留下的临时文件（只动 6 小时前的）。
-
-协议 MIT。仓库里没有商业 IP 的动画：内置的「不播放动画」是一帧纯黑；演示动画是本模块用
-`tools/make_demo.py` 自己生成的（深色底 + 旋转加载环），想换配色/尺寸改参数重跑即可。
+Licensed under the MIT License. This repository contains no commercial IP assets: "Disable Animation" consists of a single pure black frame, and the demo animation is generated cleanly via `tools/make_demo.py`.

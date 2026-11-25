@@ -1,10 +1,10 @@
 #!/system/bin/sh
-ui_print "***************************"
-ui_print " 启幕 · HyperOS 开机动画管理器"
-ui_print "***************************"
-ui_print "- 动画库：/data/adb/bootanims"
-ui_print "- 生效路径：/data/system/theme/boots/bootanimation.zip"
-ui_print "***************************"
+ui_print "*****************************************"
+ui_print " QIMU · Boot Animation Manager"
+ui_print "*****************************************"
+ui_print "- Animation library: /data/adb/bootanims"
+ui_print "- Active theme path: /data/system/theme/boots/bootanimation.zip"
+ui_print "*****************************************"
 
 MODDIR="${MODPATH:-${0%/*}}"
 LIB=/data/adb/bootanims
@@ -12,9 +12,9 @@ STATE="$MODDIR/var/state"
 
 mkdir -p "$MODDIR/var/logs" "$STATE" "$LIB" 2>/dev/null
 chmod 0755 "$MODDIR"/*.sh "$MODDIR/bin/ctl.sh" 2>/dev/null
-chmod 0644 "$MODDIR/module.prop" "$MODDIR/webroot/index.html" 2>/dev/null
+chmod 0644 "$MODDIR/module.prop" "$MODDIR/webroot/index.html" "$MODDIR/webroot/i18n.js" 2>/dev/null
 
-# ---- 内置动画入库（已存在同名文件则跳过，保护用户自己的动画）----
+# ---- Seed built-in animations (skip existing to preserve user files) ----
 seeded=0; kept_n=0; kept_names=""
 for f in "$MODDIR"/animations/*.zip; do
   [ -f "$f" ] || continue
@@ -22,33 +22,29 @@ for f in "$MODDIR"/animations/*.zip; do
   if [ ! -f "$LIB/$n" ]; then
     cp -f "$f" "$LIB/$n" 2>/dev/null && chmod 0644 "$LIB/$n" 2>/dev/null && seeded=$((seeded + 1))
   else
-    # 同名但内容可能不同（用户改过 / 自己导入过）——不覆盖，只报出来
     kept_n=$((kept_n + 1))
     [ "$kept_n" -le 3 ] && kept_names="$kept_names $n"
   fi
 done
-[ "$seeded" -gt 0 ] && ui_print "- 内置动画入库：$seeded 个"
+[ "$seeded" -gt 0 ] && ui_print "- Seeded built-in animations: $seeded item(s)"
 if [ "$kept_n" -gt 0 ]; then
-  [ "$kept_n" -gt 3 ] && kept_names="$kept_names 等 $kept_n 个"
-  ui_print "- 同名动画已在库里，保留你的版本：$kept_names"
+  [ "$kept_n" -gt 3 ] && kept_names="$kept_names and others ($kept_n total)"
+  ui_print "- Existing animation kept: $kept_names"
 fi
 
 count=$(ls "$LIB"/*.zip 2>/dev/null | wc -l | tr -d ' ')
-ui_print "- 当前动画库共 $count 个动画"
+ui_print "- Animation library total: $count animation(s)"
 
-# ---- 升级安装时沿用旧模块里的选择 ----
-# 管理器更新模块会整个替换模块目录，var/state 里的选择也会一起没掉，
-# 所以这里先把旧模块记的选择拷过来（旧目录在替换前仍然存在）。
+# ---- Preserve settings across upgrades ----
 OLD_STATE="/data/adb/modules/custom_bootanimation/var/state"
 if [ ! -s "$STATE/selected.txt" ] && [ -s "$OLD_STATE/selected.txt" ]; then
   cp -f "$OLD_STATE/selected.txt" "$STATE/selected.txt" 2>/dev/null
   [ -s "$OLD_STATE/order.txt" ] && cp -f "$OLD_STATE/order.txt" "$STATE/order.txt" 2>/dev/null
-  # 手动分辨率名单也要沿用，不然升级一次，手动设过的动画又被自动适配覆盖回去
   [ -s "$OLD_STATE/manual.txt" ] && cp -f "$OLD_STATE/manual.txt" "$STATE/manual.txt" 2>/dev/null
-  ui_print "- 已沿用上次的选择：$(cat "$STATE/selected.txt" 2>/dev/null)"
+  ui_print "- Preserved previous selection: $(cat "$STATE/selected.txt" 2>/dev/null)"
 fi
 
-# ---- 首次安装（没有选择记录）时给一个默认可用的动画 ----
+# ---- Initial install: set a default active animation ----
 if [ ! -s "$STATE/selected.txt" ]; then
   default_anim=""
   for f in "$MODDIR"/animations/*.zip; do
@@ -62,11 +58,11 @@ if [ ! -s "$STATE/selected.txt" ]; then
   fi
   if [ -n "$default_anim" ]; then
     printf '%s\n' "$default_anim" >"$STATE/selected.txt" 2>/dev/null
-    ui_print "- 默认动画：$default_anim"
+    ui_print "- Default animation: $default_anim"
   fi
 fi
 
-# ---- 安装守卫脚本（模块被关闭时靠它把动画恢复出厂）----
+# ---- Install guard scripts to restore stock animation if module is disabled ----
 if [ -x "$MODDIR/bin/ctl.sh" ]; then
   "$MODDIR/bin/ctl.sh" guard >/dev/null 2>&1
 fi
@@ -74,7 +70,7 @@ guard_n=0
 for d in /data/adb/post-fs-data.d /data/adb/service.d; do
   [ -f "$d/qimu-guard.sh" ] && guard_n=$((guard_n + 1))
 done
-[ "$guard_n" -gt 0 ] && ui_print "- 守卫脚本已装好（关掉模块后开机会回出厂动画）"
+[ "$guard_n" -gt 0 ] && ui_print "- Guard scripts installed (restores stock boot animation if disabled)"
 
-ui_print "- 装完重启，打开模块的「设置」就是界面"
-ui_print "- 界面上能直接改分辨率（自动适配本机屏幕）、改名、拖拽排序、把手机里的视频转成动画"
+ui_print "- Installation completed successfully"
+ui_print "- Reboot device, then open module Action/WebUI to configure"
