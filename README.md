@@ -11,6 +11,10 @@ A boot animation manager for HyperOS, compatible with KernelSU, SukiSU, APatch, 
 
 When loading boot animations, HyperOS checks `/data/system/theme/boots/bootanimation.zip` first, prioritizing it over `/system/media` and `/product/media`. Consequently, this module writes directly to this theme path without modifying system partitions. When the module is disabled or uninstalled, the system automatically reverts to the factory default boot animation on the next reboot.
 
+<p align="center">
+  <img src="assets/preview/qimu_preview_en.jpg" alt="QIMU WebUI Preview" width="380">
+</p>
+
 ## Features
 
 - **Switch Animations**: Click "Apply" in the WebUI; changes take effect after rebooting.

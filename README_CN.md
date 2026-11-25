@@ -11,6 +11,10 @@ HyperOS 的开机动画管理器，KernelSU / SukiSU / APatch / Magisk 都能用
 
 HyperOS 找开机动画时先看 `/data/system/theme/boots/bootanimation.zip` 这一条，比 `/system/media`、`/product/media` 都靠前，所以这个模块直接往这条路径写，不用动系统分区。关掉模块或者卸载之后，下次开机会自动回到出厂的动画。
 
+<p align="center">
+  <img src="assets/preview/qimu_preview_cn.jpg" alt="启幕 WebUI 界面预览" width="380">
+</p>
+
 ## 能干什么
 
 - 换动画：界面里点「应用」，重启生效

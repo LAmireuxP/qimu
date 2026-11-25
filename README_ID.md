@@ -11,6 +11,10 @@ Pengelola animasi boot untuk HyperOS, kompatibel dengan KernelSU / SukiSU / APat
 
 Saat memuat animasi boot, HyperOS memeriksa jalur `/data/system/theme/boots/bootanimation.zip` terlebih dahulu, mendahului `/system/media` dan `/product/media`. Oleh karena itu, modul ini menulis langsung ke jalur tersebut tanpa memodifikasi partisi sistem. Jika modul dinonaktifkan atau dihapus, perangkat akan otomatis kembali ke animasi bawaan pabrik pada boot berikutnya.
 
+<p align="center">
+  <img src="assets/preview/qimu_preview_id.jpg" alt="Pratinjau WebUI QIMU" width="380">
+</p>
+
 ## Fitur
 
 - **Ganti Animasi**: Klik "Terapkan" di antarmuka WebUI, berlaku setelah reboot perangkat.
